@@ -1,0 +1,8 @@
+{
+  "name": "VideoMind AI",
+  "description": "An advanced video analysis dashboard powered by Gemini 2.5 Flash. Upload videos or record clips to get instant AI summaries, object detection, and code extraction.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

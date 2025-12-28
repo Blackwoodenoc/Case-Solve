@@ -1,0 +1,58 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      },
+      "tag": "socks-in"
+    },
+    {
+      "port": 10809,
+      "protocol": "http",
+      "tag": "http-in"
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "146.0.72.69",
+            "port": 443,
+            "users": [
+              {
+                "id": "383c9935-60eb-4167-ba81-8ebff27b2a90",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "fingerprint": "chrome",
+          "serverName": "google.com",
+          "publicKey": "4rbu-4szdKKZyoGEhLwA_5tqjjAFYtEL5OvQDHCY3Q0",
+          "shortId": "325f371a0a47",
+          "spiderX": ""
+        }
+      },
+      "tag": "proxy"
+    }
+  ]
+}
+
+
+
+

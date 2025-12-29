@@ -67,24 +67,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ video, onVideoSelect, 
     const isTikTok = fullUrl.includes('tiktok.com');
     const isSocial = isYouTube || isInstagram || isTikTok || fullUrl.includes('vimeo.com');
 
-    // Для YouTube сначала показываем встроенный плеер, потом можно скачать
-    if (isYouTube) {
-      // Сначала просто открываем встроенный плеер
-      await onRemoteUrlSelect(fullUrl);
-      setUrl('');
-      setError(null);
-      setErrorSuggestions([]);
-      setIsFetching(false);
-      return;
-    }
-
-    // Для Instagram, TikTok - скачиваем автоматически
-    if (isInstagram || isTikTok) {
+    // Для YouTube, Instagram, TikTok - скачиваем автоматически
+    if (isYouTube || isInstagram || isTikTok) {
       setIsFetching(true);
       setError(null);
       setErrorSuggestions([]);
       
-      const platformName = isInstagram ? 'Instagram' : 'TikTok';
+      const platformName = isYouTube ? 'YouTube' : isInstagram ? 'Instagram' : 'TikTok';
       
       console.log(`🔄 Отправка запроса на скачивание ${platformName}:`, fullUrl);
       

@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { VideoPlayer } from './components/VideoPlayer';
 import { AnalysisPanel } from './components/AnalysisPanel';
 import { analyzeVideoContent, analyzeRemoteLink, fetchVideoMetadata, analyzeShortsDNA } from './services/geminiService';
+import { transcribeVideo } from './services/whisperService';
 import { VideoFile, AnalysisState, AnalysisType } from './types';
 import { BrainCircuit, Sparkles, FileVideo, Terminal, Info, Loader2, Key, ShieldCheck, ExternalLink, Dna } from 'lucide-react';
 
@@ -82,8 +83,36 @@ export default function App() {
         if (!video.file) {
           throw new Error("Анализ ДНК Shorts доступен только для загруженных файлов (не для ссылок).");
         }
+        
+        // Сначала транскрибируем видео через Whisper
+        let transcript: string | undefined = undefined;
+        try {
+          setProgressMsg("🎤 Транскрибирую аудио через Whisper...");
+          const transcriptionResult = await transcribeVideo(video.file, 'base', null, setProgressMsg);
+          transcript = transcriptionResult.transcript;
+          console.log(`✅ Транскрипция получена: ${transcript.length} символов, язык: ${transcriptionResult.language}`);
+          
+          if (transcript.length === 0) {
+            console.warn("⚠️ Транскрипт пустой, продолжаю без него");
+            transcript = undefined;
+          }
+        } catch (transcribeError: any) {
+          console.warn("⚠️ Ошибка транскрипции Whisper, продолжаю без транскрипта:", transcribeError.message);
+          
+          // Показываем предупреждение пользователю, но продолжаем анализ
+          if (transcribeError.message.includes("WHISPER_NOT_AVAILABLE") || 
+              transcribeError.message.includes("Whisper недоступен")) {
+            setProgressMsg("⚠️ Whisper недоступен. Установите: pip install openai-whisper. Продолжаю анализ без транскрипта...");
+          } else {
+            setProgressMsg("⚠️ Ошибка транскрипции. Продолжаю анализ без транскрипта...");
+          }
+          
+          // Продолжаем анализ без транскрипта - Gemini может извлечь его сам
+          transcript = undefined;
+        }
+        
         setProgressMsg("🧬 Извлекаю ДНК успеха из короткого видео...");
-        response = await analyzeShortsDNA(video.file, undefined, undefined, undefined, setProgressMsg);
+        response = await analyzeShortsDNA(video.file, transcript, undefined, undefined, setProgressMsg);
         setAnalysis({ 
           isLoading: false, 
           result: response.text, 
@@ -217,6 +246,17 @@ export default function App() {
                   <span className="font-medium text-xs">{action.label}</span>
                 </button>
               ))}
+
+              {/* Comment-to-Blueprint */}
+              <button
+                disabled={!video || analysis.isLoading || !video?.remoteUrl}
+                onClick={generateCommentBlueprint}
+                className="w-full text-left p-3.5 bg-slate-800/50 hover:bg-slate-700/50 border border-slate-700/50 rounded-lg flex items-center gap-3 transition-all disabled:opacity-40"
+                title={!video?.remoteUrl ? "Доступно только для видео по ссылке (YouTube)" : ""}
+              >
+                <Calendar size={18} className="text-cyan-400" />
+                <span className="font-medium text-xs">📋 Comment-to-Blueprint: Контент-план на 14 дней</span>
+              </button>
 
               <div className="pt-4 border-t border-slate-800/50 mt-4 flex gap-2">
                 <input

@@ -30,6 +30,7 @@ ttsave-main/
 
 # Temporary files
 temp_videos/
+downloaded_videos/
 *.tmp
 *.temp
 
@@ -64,4 +65,6 @@ build/
 
 # block vendored tools
 yt-dlp-master/
+tools/yt-dlp.exe
+tools/ffmpeg/
 

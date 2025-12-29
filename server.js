@@ -3,7 +3,7 @@ import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 
@@ -91,12 +91,92 @@ if (!fs.existsSync(TEMP_DIR)) {
   fs.mkdirSync(TEMP_DIR, { recursive: true });
 }
 
-// Путь к yt-dlp (используем системную установку)
+// Создаём папку для скачанных видео
+const DOWNLOADS_DIR = path.join(__dirname, 'downloaded_videos');
+if (!fs.existsSync(DOWNLOADS_DIR)) {
+  fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+}
+
+// Путь к yt-dlp (используем системную установку или локальный бинарник)
 // yt-dlp должен быть установлен через: pip install yt-dlp
 // Или через pipx: pipx install yt-dlp
-// Проверяем наличие в системе
+// Или скачать бинарник с https://github.com/yt-dlp/yt-dlp/releases
 const YT_DLP_CMD = 'yt-dlp'; // Системная команда
 const YT_DLP_PYTHON = 'python'; // Для запуска через Python модуль (если установлен через pip)
+const YT_DLP_LOCAL = path.join(__dirname, 'tools', 'yt-dlp.exe'); // Локальный бинарник
+const FFMPEG_LOCAL = path.join(__dirname, 'tools', 'ffmpeg', 'bin', 'ffmpeg.exe'); // Локальный ffmpeg
+
+// Функция для проверки доступности yt-dlp
+function checkYtDlpAvailable() {
+  // 1. Пробуем локальный бинарник (приоритет)
+  if (fs.existsSync(YT_DLP_LOCAL)) {
+    try {
+      // На Windows проверяем версию с помощью spawn, чтобы избежать проблем с кодировкой
+      execSync(`"${YT_DLP_LOCAL}" --version`, { 
+        stdio: 'ignore',
+        timeout: 5000,
+        windowsHide: true 
+      });
+      console.log(`✅ yt-dlp найден (локальный): ${YT_DLP_LOCAL}`);
+      return { available: true, method: 'local', command: YT_DLP_LOCAL };
+    } catch (e) {
+      console.log(`⚠️ Локальный yt-dlp.exe найден, но не запускается: ${e.message}`);
+      // Продолжаем проверку других методов
+    }
+  }
+  
+  // 2. Пробуем системную команду
+  try {
+    if (process.platform === 'win32') {
+      execSync(`where ${YT_DLP_CMD} >nul 2>&1`, { shell: true, windowsHide: true });
+    } else {
+      execSync(`which ${YT_DLP_CMD}`, { stdio: 'ignore' });
+    }
+    execSync(`${YT_DLP_CMD} --version`, { stdio: 'ignore', timeout: 5000 });
+    console.log(`✅ yt-dlp найден (системный): ${YT_DLP_CMD}`);
+    return { available: true, method: 'system', command: YT_DLP_CMD };
+  } catch (e) {
+    // Пробуем через Python
+    try {
+      execSync(`${YT_DLP_PYTHON} -m yt_dlp --version`, { 
+        stdio: 'ignore',
+        timeout: 5000 
+      });
+      console.log(`✅ yt-dlp найден (python): ${YT_DLP_PYTHON} -m yt_dlp`);
+      return { available: true, method: 'python', command: YT_DLP_PYTHON, args: ['-m', 'yt_dlp'] };
+    } catch (e2) {
+      console.log(`❌ yt-dlp не найден ни одним методом`);
+      return { available: false, method: null };
+    }
+  }
+}
+
+// Функция для получения команды yt-dlp с правильными аргументами
+function getYtDlpCommand(baseArgs) {
+  const check = checkYtDlpAvailable();
+  if (!check.available) {
+    throw new Error('yt-dlp не найден. Установите: pip install yt-dlp или скачайте с https://github.com/yt-dlp/yt-dlp/releases');
+  }
+  
+  // Если используем локальный бинарник, добавляем путь к ffmpeg если он есть
+  if (check.method === 'local' && fs.existsSync(FFMPEG_LOCAL)) {
+    const ffmpegDir = path.dirname(FFMPEG_LOCAL);
+    // Добавляем путь к ffmpeg в переменные окружения для процесса
+    baseArgs = ['--ffmpeg-location', ffmpegDir, ...baseArgs];
+  }
+  
+  if (check.method === 'python') {
+    return {
+      command: check.command,
+      args: [...(check.args || []), ...baseArgs]
+    };
+  } else {
+    return {
+      command: check.command,
+      args: baseArgs
+    };
+  }
+}
 
 // Очистка старых файлов (старше 30 минут)
 function cleanOldFiles() {
@@ -256,6 +336,393 @@ app.post('/api/youtube-comments', async (req, res) => {
     });
   }
 });
+
+// Async wrapper для обработки ошибок в async route handlers
+const asyncHandler = (fn) => (req, res, next) => {
+  Promise.resolve(fn(req, res, next)).catch(next);
+};
+
+
+// API для полной обработки YouTube видео: скачивание + метаданные + анализ
+app.post('/api/youtube-full-analysis', asyncHandler(async (req, res) => {
+  const { url } = req.body;
+  let responseSent = false;
+
+  console.log(`📨 Получен запрос на полную обработку YouTube: ${url}`);
+
+  if (!url) {
+    return res.status(400).json({ error: 'URL не указан' });
+  }
+
+  const videoId = extractVideoId(url);
+  if (!videoId || !videoId.startsWith('yt_')) {
+    return res.status(400).json({ error: 'Неверный YouTube URL' });
+  }
+
+  // Убираем префикс 'yt_' для чистого ID
+  const cleanVideoId = videoId.replace(/^yt_/, '');
+  const videoFolder = path.join(DOWNLOADS_DIR, cleanVideoId);
+  
+  // Создаём папку для этого видео
+  if (!fs.existsSync(videoFolder)) {
+    fs.mkdirSync(videoFolder, { recursive: true });
+  }
+
+  console.log(`📥 Начинаю полную обработку: ${cleanVideoId}`);
+  console.log(`📁 Папка для видео: ${videoFolder}`);
+
+  try {
+    // Шаг 1: Скачиваем видео
+    console.log(`🎬 Шаг 1: Скачиваю видео...`);
+    const videoFilename = `${cleanVideoId}.%(ext)s`;
+    const videoPath = path.join(videoFolder, videoFilename);
+    
+    const isShorts = url.includes('/shorts/');
+    const downloadArgs = [
+      '--no-warnings',
+      '--no-check-certificates',
+      '--output', videoPath,
+      '--no-playlist',
+      '--max-filesize', '500M',
+      '--referer', 'https://www.youtube.com/',
+      '--add-header', 'Accept-Language:en-US,en;q=0.9',
+      '--extractor-args', 'youtube:player_client=android,web'
+    ];
+
+    if (isShorts) {
+      downloadArgs.push('--format', 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best');
+    } else {
+      downloadArgs.push('--format', 'best[ext=mp4][height<=1080]/best[ext=mp4]/best');
+    }
+
+    downloadArgs.push(url);
+
+    const ytdlpConfig = getYtDlpCommand(downloadArgs);
+    const downloadProcess = spawn(ytdlpConfig.command, ytdlpConfig.args, {
+      cwd: videoFolder,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      shell: process.platform === 'win32'
+    });
+
+    let downloadStdout = '';
+    let downloadStderr = '';
+
+    downloadProcess.stdout.on('data', (data) => {
+      downloadStdout += data.toString();
+    });
+
+    downloadProcess.stderr.on('data', (data) => {
+      downloadStderr += data.toString();
+    });
+
+    await new Promise((resolve, reject) => {
+      downloadProcess.on('close', (code) => {
+        if (code !== 0) {
+          console.error(`❌ yt-dlp завершился с кодом ${code}`);
+          console.error(`📝 stderr: ${downloadStderr.substring(0, 500)}`);
+          
+          // Определяем тип ошибки
+          let errorMessage = 'Ошибка при скачивании видео';
+          if (downloadStderr.includes('HTTP Error 404') || downloadStderr.includes('HTTP 404')) {
+            errorMessage = 'Видео не найдено или удалено. Проверьте ссылку';
+          } else if (downloadStderr.includes('Video unavailable') || downloadStderr.includes('unavailable')) {
+            errorMessage = 'Видео недоступно. Возможно, оно приватное или заблокировано';
+          } else if (downloadStderr.includes('Private video') || downloadStderr.includes('private')) {
+            errorMessage = 'Это приватное видео, доступ запрещён';
+          } else if (downloadStderr.includes('age-restricted')) {
+            errorMessage = 'Видео имеет возрастные ограничения';
+          } else if (downloadStderr.includes('403') || downloadStderr.includes('Forbidden')) {
+            errorMessage = 'Доступ запрещён. YouTube заблокировал запрос';
+          } else if (downloadStderr.includes('429') || downloadStderr.includes('rate limit')) {
+            errorMessage = 'Превышен лимит запросов. Подождите 2-3 минуты';
+          } else if (downloadStderr.includes('Command not found') || downloadStderr.includes('not found')) {
+            errorMessage = 'yt-dlp не установлен. Установите: pip install yt-dlp';
+          }
+          
+          reject(new Error(errorMessage));
+        } else {
+          resolve(null);
+        }
+      });
+
+      downloadProcess.on('error', (err) => {
+        console.error('❌ Ошибка запуска yt-dlp:', err);
+        reject(new Error(`Не удалось запустить yt-dlp: ${err.message}`));
+      });
+    });
+
+    // Находим скачанный файл
+    const files = fs.readdirSync(videoFolder);
+    const videoFile = files.find(f => f.startsWith(cleanVideoId) && !f.endsWith('.info.json'));
+    
+    if (!videoFile) {
+      throw new Error('Видео файл не найден после скачивания');
+    }
+
+    const videoFilePath = path.join(videoFolder, videoFile);
+    const videoStats = fs.statSync(videoFilePath);
+    
+    console.log(`✅ Видео скачано: ${videoFile} (${(videoStats.size / 1024 / 1024).toFixed(2)} MB)`);
+
+    // Шаг 2: Извлекаем метаданные и комментарии
+    console.log(`📊 Шаг 2: Извлекаю метаданные и комментарии...`);
+    
+    const metadataArgs = [
+      '--write-comments',
+      '--write-info-json',
+      '--skip-download',
+      '--no-warnings',
+      '--extractor-args', 'youtube:comment_sort=newest',
+      '--max-comments', '1000',
+      '-o', path.join(videoFolder, `${cleanVideoId}_metadata`),
+      url
+    ];
+
+    const metadataConfig = getYtDlpCommand(metadataArgs);
+    const metadataProcess = spawn(metadataConfig.command, metadataConfig.args, {
+      cwd: videoFolder,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      shell: process.platform === 'win32'
+    });
+
+    let metadataStdout = '';
+    let metadataStderr = '';
+
+    metadataProcess.stdout.on('data', (data) => {
+      metadataStdout += data.toString();
+    });
+
+    metadataProcess.stderr.on('data', (data) => {
+      metadataStderr += data.toString();
+    });
+
+    await new Promise((resolve, reject) => {
+      metadataProcess.on('close', (code) => {
+        if (code !== 0) {
+          console.warn(`⚠️ Предупреждение при извлечении метаданных: ${metadataStderr.substring(0, 200)}`);
+        }
+        resolve(null);
+      });
+
+      metadataProcess.on('error', (err) => {
+        console.warn(`⚠️ Ошибка извлечения метаданных: ${err.message}`);
+        resolve(null);
+      });
+    });
+
+    // Читаем метаданные
+    const metadataPath = path.join(videoFolder, `${cleanVideoId}_metadata.info.json`);
+    let metadata = null;
+    let comments = [];
+    let viewCount = 0;
+    let likeCount = 0;
+    let channelName = '';
+    let videoTitle = '';
+    let videoDescription = '';
+    let duration = 0;
+    let uploadDate = '';
+
+    if (fs.existsSync(metadataPath)) {
+      try {
+        metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf-8'));
+        
+        viewCount = metadata.view_count || 0;
+        likeCount = metadata.like_count || 0;
+        channelName = metadata.channel || metadata.uploader || metadata.channel_id || 'Unknown';
+        videoTitle = metadata.title || 'Untitled';
+        videoDescription = metadata.description || '';
+        duration = metadata.duration || 0;
+        uploadDate = metadata.upload_date || metadata.release_date || '';
+
+         const rawComments = metadata.comments || [];
+         comments = rawComments.map(comment => ({
+           id: comment.id || 'unknown',
+           author: comment.author || 'Unknown',
+           text: comment.text || '',
+           like_count: comment.like_count || 0,
+           reply_count: comment.reply_count || 0,
+           published_at: comment.timestamp || new Date().toISOString(),
+           is_pinned: comment.is_favorited || false,
+           creator_hearted: false
+         }));
+
+         // Сортируем комментарии по лайкам (топ комментарии)
+         comments = comments.sort((a, b) => (b.like_count || 0) - (a.like_count || 0));
+
+         console.log(`✅ Извлечено метаданных: ${comments.length} комментариев, ${viewCount} просмотров, ${likeCount} лайков`);
+         
+         // Выводим топ-5 комментариев для проверки
+         if (comments.length > 0) {
+           console.log(`🔥 Топ-5 комментариев по лайкам:`);
+           comments.slice(0, 5).forEach((c, i) => {
+             const textPreview = c.text.length > 60 ? c.text.substring(0, 60) + '...' : c.text;
+             console.log(`  ${i + 1}. ${c.author}: ${textPreview} (${c.like_count} лайков)`);
+           });
+         } else {
+           console.log(`⚠️ Комментарии не найдены или не извлечены`);
+         }
+      } catch (parseError) {
+        console.error('❌ Ошибка парсинга метаданных:', parseError);
+      }
+    }
+
+    // Шаг 3: Анализируем последние 10 комментариев
+    console.log(`🔍 Шаг 3: Анализирую последние 10 комментариев...`);
+    
+    const last10Comments = comments.slice(0, 10);
+    const commentAnalysis = {
+      total_comments: comments.length,
+      analyzed_count: last10Comments.length,
+      comments: last10Comments.map(comment => ({
+        author: comment.author,
+        text: comment.text,
+        likes: comment.like_count,
+        sentiment: analyzeCommentSentiment(comment.text),
+        keywords: extractKeywords(comment.text)
+      })),
+      summary: {
+        average_likes: last10Comments.length > 0 
+          ? Math.round(last10Comments.reduce((sum, c) => sum + c.like_count, 0) / last10Comments.length)
+          : 0,
+        most_liked_comment: last10Comments.length > 0
+          ? last10Comments.reduce((max, c) => c.like_count > max.like_count ? c : max, last10Comments[0])
+          : null,
+        common_words: extractCommonWords(last10Comments.map(c => c.text))
+      }
+    };
+
+    const result = {
+      success: true,
+      video_id: cleanVideoId,
+      video_info: {
+        title: videoTitle,
+        channel: channelName,
+        description: videoDescription,
+        duration: duration,
+        upload_date: uploadDate,
+        view_count: viewCount,
+        like_count: likeCount,
+        url: url
+      },
+      video_file: {
+        filename: videoFile,
+        path: videoFilePath,
+        size: videoStats.size,
+        size_mb: (videoStats.size / 1024 / 1024).toFixed(2),
+        folder: videoFolder
+      },
+      metadata: {
+        total_comments: comments.length,
+        all_comments: comments,
+        view_count: viewCount,
+        like_count: likeCount
+      },
+      analysis: commentAnalysis,
+      downloaded_at: new Date().toISOString()
+    };
+
+    console.log(`✅ Полная обработка завершена для ${cleanVideoId}`);
+    
+    responseSent = true;
+    res.json(result);
+
+  } catch (error) {
+    if (responseSent) return;
+    console.error('❌ Ошибка полной обработки:', error);
+    console.error('Стек ошибки:', error.stack);
+    responseSent = true;
+    
+    // Формируем понятное сообщение об ошибке
+    let errorMessage = error.message || 'Ошибка обработки YouTube видео';
+    let suggestions = [];
+    
+    // Добавляем рекомендации в зависимости от типа ошибки
+    if (errorMessage.includes('yt-dlp не установлен') || errorMessage.includes('not found')) {
+      suggestions = [
+        'Установите yt-dlp: pip install yt-dlp',
+        'Или скачайте бинарник: https://github.com/yt-dlp/yt-dlp/releases'
+      ];
+    } else if (errorMessage.includes('лимит запросов') || errorMessage.includes('rate limit')) {
+      suggestions = [
+        'Подождите 2-3 минуты перед повторной попыткой',
+        'Используйте альтернативные сервисы (y2mate.com)'
+      ];
+    } else if (errorMessage.includes('403') || errorMessage.includes('запрещён')) {
+      suggestions = [
+        'Попробуйте позже',
+        'Используйте альтернативные сервисы (y2mate.com)',
+        'Обновите yt-dlp: pip install -U yt-dlp'
+      ];
+    } else if (errorMessage.includes('404') || errorMessage.includes('не найдено')) {
+      suggestions = [
+        'Проверьте, что ссылка правильная и видео существует',
+        'Попробуйте использовать альтернативные сервисы'
+      ];
+    }
+    
+    res.status(500).json({
+      error: errorMessage,
+      suggestions: suggestions.length > 0 ? suggestions : undefined,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+}));
+
+// Вспомогательные функции для анализа комментариев
+function analyzeCommentSentiment(text) {
+  if (!text) return 'neutral';
+  
+  const lowerText = text.toLowerCase();
+  const positiveWords = ['отлично', 'класс', 'супер', 'люблю', 'нравится', 'спасибо', 'great', 'awesome', 'love', 'amazing', 'best'];
+  const negativeWords = ['плохо', 'ужасно', 'ненавижу', 'не нравится', 'bad', 'terrible', 'hate', 'worst', 'awful'];
+  
+  const positiveCount = positiveWords.filter(word => lowerText.includes(word)).length;
+  const negativeCount = negativeWords.filter(word => lowerText.includes(word)).length;
+  
+  if (positiveCount > negativeCount) return 'positive';
+  if (negativeCount > positiveCount) return 'negative';
+  return 'neutral';
+}
+
+function extractKeywords(text) {
+  if (!text) return [];
+  
+  const stopWords = new Set(['это', 'что', 'как', 'для', 'или', 'the', 'and', 'for', 'are', 'was', 'were', 'been', 'have', 'has', 'had']);
+  const words = text.toLowerCase().match(/\b[a-zа-яё]{4,}\b/gi) || [];
+  const keywords = words.filter(word => !stopWords.has(word.toLowerCase()));
+  
+  const wordCount = {};
+  keywords.forEach(word => {
+    wordCount[word] = (wordCount[word] || 0) + 1;
+  });
+  
+  return Object.entries(wordCount)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([word]) => word);
+}
+
+function extractCommonWords(commentTexts) {
+  const allWords = [];
+  commentTexts.forEach(text => {
+    if (text) {
+      const words = text.toLowerCase().match(/\b[a-zа-яё]{3,}\b/gi) || [];
+      allWords.push(...words);
+    }
+  });
+  
+  const wordCount = {};
+  allWords.forEach(word => {
+    wordCount[word] = (wordCount[word] || 0) + 1;
+  });
+  
+  return Object.entries(wordCount)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([word, count]) => ({ word, count }));
+}
 
 // API для создания "Паспорта стиля" на основе комментариев
 app.post('/api/style-passport', async (req, res) => {
@@ -609,7 +1076,7 @@ function detectLanguage(comments) {
 }
 
 // API для скачивания YouTube видео
-app.post('/api/download-youtube', async (req, res) => {
+app.post('/api/download-youtube', asyncHandler(async (req, res) => {
   const { url } = req.body;
   let responseSent = false; // Защита от двойной отправки
 
@@ -619,23 +1086,23 @@ app.post('/api/download-youtube', async (req, res) => {
     return res.status(400).json({ error: 'URL не указан' });
   }
 
-  const videoId = extractVideoId(url);
-  const filename = `${videoId}_${Date.now()}.mp4`;
-  const filepath = path.join(TEMP_DIR, filename);
-  
-  // Определяем платформу для оптимизации параметров
-  const platform = url.includes('instagram.com') ? 'instagram' : 
-                   url.includes('tiktok.com') ? 'tiktok' : 'youtube';
-
-  console.log(`📥 Скачиваю ${platform.toUpperCase()}: ${url}`);
-  console.log(`📁 Файл: ${filename}`);
-
   try {
+    const videoId = extractVideoId(url);
+    const timestamp = Date.now();
+    const filenameTemplate = `${videoId}_${timestamp}.%(ext)s`;
+    const filepath = path.join(TEMP_DIR, filenameTemplate);
+    
+    // Определяем платформу для оптимизации параметров
+    const platform = url.includes('instagram.com') ? 'instagram' : 
+                     url.includes('tiktok.com') ? 'tiktok' : 'youtube';
+
+    console.log(`📥 Скачиваю ${platform.toUpperCase()}: ${url}`);
+    console.log(`📁 Шаблон файла: ${filenameTemplate}`);
     // Для TikTok используем SSSTik API
     if (platform === 'tiktok') {
       console.log('🎵 Используем SSSTik для TikTok');
       
-      const ssstikScript = path.join(__dirname, 'download_ssstik.py');
+      const ssstikScript = path.join(__dirname, 'scripts', 'download', 'download_ssstik.py');
       const ssstik = spawn('python', [ssstikScript, url, TEMP_DIR]);
 
       let stdoutData = '';
@@ -724,193 +1191,363 @@ app.post('/api/download-youtube', async (req, res) => {
       return; // Выходим, не запускаем yt-dlp для TikTok
     }
 
-    // Для Instagram используем специальный Python downloader (instaloader)
-    if (platform === 'instagram') {
-      console.log('📸 Используем Instagram downloader (instaloader)');
-      
-      const instagramScript = path.join(__dirname, 'download_instagram.py');
-      const instagram = spawn('python', [instagramScript, url, TEMP_DIR]);
-
-      let stdoutData = '';
-      let stderrData = '';
-
-      instagram.stdout.on('data', (data) => {
-        stdoutData += data.toString();
-      });
-
-      instagram.stderr.on('data', (data) => {
-        stderrData += data.toString();
-        console.log(`[Instagram] ${data.toString().trim()}`);
-      });
-
-      instagram.on('close', (code) => {
-        if (responseSent) return;
-        try {
-          // Парсим JSON результат из stdout
-          const lines = stdoutData.trim().split('\n');
-          const lastLine = lines[lines.length - 1];
-          const result = JSON.parse(lastLine);
-
-          if (!result.success) {
-            console.error(`❌ Instagram ошибка: ${result.error}`);
-            responseSent = true;
-            return res.status(500).json({ 
-              error: result.error.includes('фото') || result.error.includes('найти видео') 
-                ? '📸 Это Instagram пост с фото, а не видео. Используйте ссылку на Instagram Reels (видео)' 
-                : `Instagram: ${result.error}`
-            });
-          }
-
-          // Получаем путь к скачанному файлу
-          const downloadedPath = result.path;
-          
-          if (!fs.existsSync(downloadedPath)) {
-            responseSent = true;
-            return res.status(500).json({ error: 'Файл не найден после скачивания' });
-          }
-
-          console.log(`✅ Instagram скачан: ${downloadedPath}`);
-          console.log(`📦 Размер: ${result.size_mb} MB`);
-
-          // Читаем и отправляем
-          const videoBuffer = fs.readFileSync(downloadedPath);
-          const base64Video = videoBuffer.toString('base64');
-
-          responseSent = true;
-          res.json({
-            success: true,
-            filename: result.filename,
-            size: videoBuffer.length,
-            base64: base64Video,
-            mimeType: 'video/mp4'
-          });
-
-          // Удаляем файл сразу после отправки
-          setTimeout(() => {
-            if (fs.existsSync(downloadedPath)) {
-              fs.unlinkSync(downloadedPath);
-              console.log(`🗑️  Удалён: ${result.filename}`);
-            }
-          }, 1000);
-
-        } catch (parseError) {
-          if (responseSent) return;
-          console.error('❌ Ошибка парсинга результата Instagram:', parseError);
-          console.error('stdout:', stdoutData);
-          console.error('stderr:', stderrData);
-          responseSent = true;
-          res.status(500).json({ 
-            error: 'Instagram: Ошибка обработки результата'
-          });
-        }
-      });
-
-      instagram.on('error', (err) => {
-        if (responseSent) return;
-        console.error('❌ Ошибка запуска Instagram downloader:', err);
-        responseSent = true;
-        res.status(500).json({ 
-          error: 'Не удалось запустить Instagram downloader',
-          details: err.message
-        });
-      });
-
-      return; // Выходим, не запускаем yt-dlp для Instagram
-    }
-
-    // Для YouTube используем yt-dlp
-    // Базовые параметры
+    // Используем yt-dlp для YouTube и Instagram
+    // Базовые параметры для всех платформ
     const baseArgs = [
-      YT_DLP_PATH,
       '--no-warnings',
       '--no-check-certificates',
-      '--output', filepath,
+      '--output', filepath, // Путь с шаблоном %(ext)s
       '--no-playlist',
       '--max-filesize', '150M',
-      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      '--referer', 'https://www.youtube.com/',
-      '--add-header', 'Accept-Language:en-US,en;q=0.9',
-      '--extractor-args', 'youtube:player_client=android,web',
-      '--format', 'best[ext=mp4][height<=720]/best[ext=mp4]/best',
       '--retries', '3',
-      '--fragment-retries', '3'
+      '--fragment-retries', '3',
+      '--no-mtime', // Не изменять время модификации файла
+      '--progress', // Показывать прогресс
     ];
 
-    // Запускаем yt-dlp (системная команда)
-    const ytdlp = spawn(YT_DLP_CMD, [...baseArgs, url], { shell: true });
+    // Платформо-специфичные параметры
+    if (platform === 'youtube') {
+      const isShorts = url.includes('/shorts/');
+      
+      baseArgs.push(
+        '--referer', 'https://www.youtube.com/',
+        '--add-header', 'Accept-Language:en-US,en;q=0.9',
+        '--extractor-args', 'youtube:player_client=android,web'
+      );
+      
+      // Для Shorts используем более гибкие параметры формата
+      if (isShorts) {
+        baseArgs.push('--format', 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best');
+        console.log('📱 Обнаружен YouTube Shorts, используем специальные параметры');
+      } else {
+        baseArgs.push('--format', 'best[ext=mp4][height<=720]/best[ext=mp4]/best');
+      }
+    } else if (platform === 'instagram') {
+      // Параметры для Instagram (Reels, посты, истории)
+      baseArgs.push(
+        '--referer', 'https://www.instagram.com/',
+        '--add-header', 'Accept-Language:en-US,en;q=0.9',
+        '--format', 'best[ext=mp4]/best', // Instagram может иметь разные форматы
+        '--extractor-args', 'instagram:webpage_display=Desktop'
+      );
+    } else {
+      // Для других платформ (TikTok через SSSTik, fallback)
+      baseArgs.push('--format', 'best[ext=mp4]/best');
+    }
+
+    baseArgs.push(url);
+
+    // Получаем правильную команду для yt-dlp
+    let ytdlpConfig;
+    try {
+      ytdlpConfig = getYtDlpCommand(baseArgs);
+      console.log(`🔧 Используем yt-dlp через: ${ytdlpConfig.command}`);
+      console.log(`📋 Первые аргументы: ${ytdlpConfig.args.slice(0, 5).join(' ')}...`);
+      console.log(`📁 Выходной файл: ${filepath}`);
+    } catch (error) {
+      if (responseSent) return;
+      console.error('❌ yt-dlp не найден:', error.message);
+      console.error('Проверка доступности:', checkYtDlpAvailable());
+      responseSent = true;
+      return res.status(500).json({ 
+        error: error.message,
+        help: 'Установите yt-dlp: pip install yt-dlp или скачайте с https://github.com/yt-dlp/yt-dlp/releases',
+        check: checkYtDlpAvailable()
+      });
+    }
+
+    // Запускаем yt-dlp
+    console.log(`🚀 Запускаем: ${ytdlpConfig.command}`);
+    console.log(`📋 Аргументы: ${ytdlpConfig.args.slice(0, 10).join(' ')}...`);
+    console.log(`📁 Рабочая директория: ${TEMP_DIR}`);
+    
+    // Для Windows используем shell: true для более надежной работы с путями
+    const useShell = process.platform === 'win32';
+    console.log(`🔧 Используем shell: ${useShell} (платформа: ${process.platform})`);
+    
+    const spawnOptions = {
+      cwd: TEMP_DIR, // Устанавливаем рабочую директорию
+      stdio: ['ignore', 'pipe', 'pipe'], // stdin, stdout, stderr
+      windowsHide: true, // Скрываем окно консоли на Windows
+      shell: useShell
+    };
+    
+    const ytdlp = spawn(ytdlpConfig.command, ytdlpConfig.args, spawnOptions);
 
     let errorOutput = '';
+    let stdoutOutput = '';
 
     ytdlp.stdout.on('data', (data) => {
-      console.log(`[yt-dlp] ${data}`);
+      const output = data.toString();
+      stdoutOutput += output;
+      console.log(`[yt-dlp stdout] ${output.trim()}`);
     });
 
     ytdlp.stderr.on('data', (data) => {
-      errorOutput += data.toString();
-      console.error(`[yt-dlp error] ${data}`);
+      const output = data.toString();
+      errorOutput += output;
+      console.error(`[yt-dlp stderr] ${output.trim()}`);
     });
 
     ytdlp.on('close', (code) => {
       if (responseSent) return;
+      console.log(`📊 yt-dlp завершился с кодом: ${code}`);
+      
       if (code !== 0) {
         console.error(`❌ yt-dlp завершился с кодом ${code}`);
-        console.error(`Ошибка: ${errorOutput}`);
+        console.error(`📝 stdout (первые 500 символов): ${stdoutOutput.substring(0, 500)}`);
+        console.error(`📝 stderr (первые 500 символов): ${errorOutput.substring(0, 500)}`);
         
         // Определяем тип ошибки
         let userMessage = 'Ошибка при скачивании видео';
+        let errorCode = 'UNKNOWN_ERROR';
+        let suggestions = [];
+        const isShorts = url.includes('/shorts/');
         
-        if (errorOutput.includes('There is no video in this post')) {
+        // Instagram ошибки
+        if (errorOutput.includes('There is no video in this post') || 
+            errorOutput.includes('No video formats found') ||
+            errorOutput.includes('This post does not contain a video')) {
           userMessage = '📸 Это Instagram пост с фото, а не видео. Используйте ссылку на Instagram Reels (видео)';
-        } else if (errorOutput.includes('HTTP Error 404') || errorOutput.includes('unable to download')) {
-          userMessage = '⚠️ YouTube заблокировал запрос. Попробуйте другую ссылку или скачайте вручную (y2mate.com)';
-        } else if (errorOutput.includes('Video unavailable') || errorOutput.includes('not available')) {
-          userMessage = `Видео недоступно. Возможно, оно приватное или удалено`;
-        } else if (errorOutput.includes('Private video') || errorOutput.includes('private')) {
+          errorCode = 'INSTAGRAM_NO_VIDEO';
+        } else if (errorOutput.includes('Login required') && platform === 'instagram') {
+          userMessage = 'Instagram требует авторизацию. Попробуйте публичную ссылку на Reels';
+          errorCode = 'INSTAGRAM_LOGIN_REQUIRED';
+        } else if (errorOutput.includes('Private') && platform === 'instagram') {
+          userMessage = 'Это приватный Instagram пост. Используйте публичную ссылку';
+          errorCode = 'INSTAGRAM_PRIVATE';
+        }
+        // YouTube ошибки
+        else if (errorOutput.includes('HTTP Error 404') || 
+                 errorOutput.includes('unable to download') ||
+                 errorOutput.includes('HTTP 404') ||
+                 errorOutput.includes('404 Not Found')) {
+          if (platform === 'youtube' && isShorts) {
+            userMessage = '⚠️ YouTube Shorts: Видео не найдено или удалено. Проверьте ссылку';
+            errorCode = 'YOUTUBE_SHORTS_404';
+            suggestions = [
+              'Проверьте, что ссылка на Shorts правильная',
+              'Попробуйте использовать y2mate.com для скачивания',
+              'Попробуйте конвертировать ссылку Shorts в обычную ссылку YouTube'
+            ];
+          } else {
+            userMessage = platform === 'youtube' 
+              ? '⚠️ YouTube: Видео не найдено или удалено. Проверьте ссылку или попробуйте скачать вручную (y2mate.com)'
+              : 'Видео недоступно или удалено';
+            errorCode = 'YOUTUBE_404';
+            if (platform === 'youtube') {
+              suggestions = [
+                'Проверьте, что ссылка правильная и видео существует',
+                'Попробуйте использовать y2mate.com для скачивания',
+                'Попробуйте другую ссылку на то же видео'
+              ];
+            }
+          }
+        } else if (errorOutput.includes('Video unavailable') || 
+                   errorOutput.includes('not available') ||
+                   errorOutput.includes('unavailable')) {
+          userMessage = `Видео недоступно. Возможно, оно приватное, удалено или заблокировано в вашем регионе`;
+          errorCode = 'YOUTUBE_UNAVAILABLE';
+          suggestions = [
+            'Проверьте, что видео публичное и доступно',
+            'Попробуйте использовать VPN',
+            'Используйте альтернативные сервисы (y2mate.com)'
+          ];
+        } else if (errorOutput.includes('Private video') || 
+                   errorOutput.includes('private') ||
+                   errorOutput.includes('Private')) {
           userMessage = 'Это приватное видео, доступ запрещён';
-        } else if (errorOutput.includes('age-restricted')) {
-          userMessage = 'Видео имеет возрастные ограничения';
-        } else if (errorOutput.includes('Login required') || errorOutput.includes('Sign in')) {
-          userMessage = 'Требуется авторизация. Попробуйте скачать вручную';
+          errorCode = 'YOUTUBE_PRIVATE';
+        } else if (errorOutput.includes('age-restricted') || 
+                   errorOutput.includes('Age-restricted')) {
+          userMessage = 'Видео имеет возрастные ограничения. yt-dlp не может скачать такие видео без авторизации';
+          errorCode = 'YOUTUBE_AGE_RESTRICTED';
+          suggestions = [
+            'Используйте альтернативные сервисы (y2mate.com)',
+            'Попробуйте скачать через браузер с авторизацией'
+          ];
+        } else if (errorOutput.includes('Login required') || 
+                   errorOutput.includes('Sign in') ||
+                   errorOutput.includes('authentication')) {
+          userMessage = 'Требуется авторизация. Попробуйте скачать вручную через y2mate.com';
+          errorCode = 'YOUTUBE_LOGIN_REQUIRED';
+        } else if (errorOutput.includes('is not a valid URL') || 
+                   errorOutput.includes('Invalid URL') ||
+                   errorOutput.includes('ERROR: Unsupported URL')) {
+          userMessage = 'Неверный URL. Проверьте ссылку на видео';
+          errorCode = 'INVALID_URL';
+        } else if (errorOutput.includes('ERROR') && errorOutput.includes('youtube')) {
+          if (isShorts) {
+            userMessage = 'Ошибка при скачивании YouTube Shorts. Возможно, YouTube временно заблокировал запрос';
+            errorCode = 'YOUTUBE_SHORTS_ERROR';
+            suggestions = [
+              'Подождите 2-3 минуты и попробуйте снова',
+              'Используйте альтернативные сервисы (y2mate.com, savefrom.net)',
+              'Обновите yt-dlp: pip install -U yt-dlp'
+            ];
+          } else {
+            userMessage = 'Ошибка при скачивании с YouTube. Возможно, YouTube временно заблокировал запрос';
+            errorCode = 'YOUTUBE_ERROR';
+            suggestions = [
+              'Подождите 2-3 минуты и попробуйте снова',
+              'Используйте альтернативные сервисы (y2mate.com, savefrom.net)',
+              'Обновите yt-dlp: pip install -U yt-dlp'
+            ];
+          }
+        } else if (errorOutput.includes('Command not found') || 
+                   errorOutput.includes('not recognized') ||
+                   errorOutput.includes('not found')) {
+          userMessage = 'yt-dlp не установлен или не найден. Установите: pip install yt-dlp';
+          errorCode = 'YTDLP_NOT_FOUND';
+          suggestions = [
+            'Установите yt-dlp: pip install yt-dlp',
+            'Или скачайте бинарник: https://github.com/yt-dlp/yt-dlp/releases'
+          ];
+        } else if (errorOutput.includes('Unsupported URL') || 
+                   errorOutput.includes('No video formats') ||
+                   errorOutput.includes('No formats found')) {
+          userMessage = platform === 'instagram'
+            ? 'Не удалось найти видео в этом Instagram посте. Убедитесь, что это Reels или пост с видео'
+            : 'Не удалось найти видео по этой ссылке. Возможно, формат не поддерживается';
+          errorCode = 'NO_FORMATS';
+        } else if (errorOutput.includes('429') || 
+                   errorOutput.includes('Too Many Requests') ||
+                   errorOutput.includes('rate limit')) {
+          userMessage = 'Превышен лимит запросов. Подождите 2-3 минуты и попробуйте снова';
+          errorCode = 'RATE_LIMIT';
+          suggestions = [
+            'Подождите 2-3 минуты перед повторной попыткой',
+            'Используйте альтернативные сервисы'
+          ];
+        } else if (errorOutput.includes('403') || 
+                   errorOutput.includes('Forbidden') ||
+                   errorOutput.includes('HTTP 403')) {
+          userMessage = 'Доступ запрещён. YouTube заблокировал запрос';
+          errorCode = 'YOUTUBE_403';
+          suggestions = [
+            'Попробуйте позже',
+            'Используйте альтернативные сервисы (y2mate.com)',
+            'Обновите yt-dlp: pip install -U yt-dlp'
+          ];
+        } else if (errorOutput.includes('Network') || 
+                   errorOutput.includes('Connection') ||
+                   errorOutput.includes('timeout')) {
+          userMessage = 'Ошибка сети. Проверьте подключение к интернету';
+          errorCode = 'NETWORK_ERROR';
+          suggestions = [
+            'Проверьте подключение к интернету',
+            'Попробуйте позже'
+          ];
+        } else {
+          // Общая ошибка - показываем более детальную информацию
+          if (platform === 'youtube' && isShorts) {
+            userMessage = `Ошибка при скачивании YouTube Shorts. Попробуйте позже или используйте альтернативные сервисы`;
+            errorCode = 'YOUTUBE_SHORTS_ERROR';
+            suggestions = [
+              'Попробуйте использовать y2mate.com или savefrom.net',
+              'Обновите yt-dlp: pip install -U yt-dlp',
+              'Проверьте, что Shorts доступен и не приватный',
+              'Попробуйте конвертировать ссылку Shorts в обычную ссылку YouTube'
+            ];
+          } else {
+            userMessage = `Ошибка при скачивании ${platform === 'youtube' ? 'YouTube' : platform === 'instagram' ? 'Instagram' : 'видео'}. Попробуйте позже или используйте альтернативные сервисы`;
+            errorCode = 'GENERAL_ERROR';
+            if (platform === 'youtube') {
+              suggestions = [
+                'Попробуйте использовать y2mate.com или savefrom.net',
+                'Обновите yt-dlp: pip install -U yt-dlp',
+                'Проверьте, что видео доступно и не приватное'
+              ];
+            }
+          }
         }
         
         responseSent = true;
         return res.status(500).json({ 
           error: userMessage,
           platform: platform,
+          errorCode: errorCode,
+          suggestions: suggestions.length > 0 ? suggestions : undefined,
           technical: errorOutput.substring(0, 500)
         });
       }
 
       // Проверяем, что файл создан
-      if (!fs.existsSync(filepath)) {
-        console.error('❌ Файл не найден после скачивания');
+      // yt-dlp использует шаблон %(ext)s, поэтому ищем файл с нужным префиксом
+      const baseName = `${videoId}_${timestamp}`;
+      console.log(`🔍 Ищем файл с префиксом: ${baseName}`);
+      
+      let files = [];
+      try {
+        files = fs.readdirSync(TEMP_DIR);
+        console.log(`📁 Файлы в temp_videos: ${files.length} файлов`);
+      } catch (dirError) {
+        console.error('❌ Ошибка чтения директории:', dirError);
+        if (responseSent) return;
         responseSent = true;
-        return res.status(500).json({ error: 'Файл не создан' });
+        return res.status(500).json({ 
+          error: 'Ошибка доступа к папке временных файлов',
+          details: dirError.message
+        });
       }
+      
+      const matchingFile = files.find(f => f.startsWith(baseName));
+      
+      if (!matchingFile) {
+        console.error('❌ Файл не найден после скачивания');
+        console.error(`Искали файл с префиксом: ${baseName}`);
+        console.error(`Доступные файлы (${files.length}):`, files.slice(0, 10).join(', '));
+        console.error(`stdout: ${stdoutOutput.substring(0, 500)}`);
+        console.error(`stderr: ${errorOutput.substring(0, 500)}`);
+        if (responseSent) return;
+        responseSent = true;
+        return res.status(500).json({ 
+          error: 'Файл не создан после скачивания',
+          details: `Искали: ${baseName}, найдено файлов: ${files.length}`,
+          stdout: stdoutOutput.substring(0, 200),
+          stderr: errorOutput.substring(0, 200)
+        });
+      }
+      
+      const downloadedFile = path.join(TEMP_DIR, matchingFile);
 
-      console.log(`✅ Видео скачано: ${filename}`);
+      const actualFilename = path.basename(downloadedFile);
+      console.log(`✅ Видео скачано: ${actualFilename}`);
 
       try {
+        // Определяем MIME тип по расширению
+        const ext = path.extname(downloadedFile).toLowerCase();
+        const mimeTypes = {
+          '.mp4': 'video/mp4',
+          '.webm': 'video/webm',
+          '.mkv': 'video/x-matroska',
+          '.mov': 'video/quicktime',
+          '.avi': 'video/x-msvideo',
+          '.flv': 'video/x-flv'
+        };
+        const mimeType = mimeTypes[ext] || 'video/mp4';
+
         // Читаем файл и отправляем как base64
-        const videoBuffer = fs.readFileSync(filepath);
+        const videoBuffer = fs.readFileSync(downloadedFile);
         const base64Video = videoBuffer.toString('base64');
         
         console.log(`📦 Размер: ${(videoBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+        console.log(`📄 Формат: ${ext} (${mimeType})`);
 
         responseSent = true;
         res.json({
           success: true,
-          filename: filename,
+          filename: actualFilename,
           size: videoBuffer.length,
           base64: base64Video,
-          mimeType: 'video/mp4'
+          mimeType: mimeType
         });
 
         // Удаляем файл через 5 минут
         setTimeout(() => {
-          if (fs.existsSync(filepath)) {
-            fs.unlinkSync(filepath);
-            console.log(`🗑️  Удалён: ${filename}`);
+          if (fs.existsSync(downloadedFile)) {
+            fs.unlinkSync(downloadedFile);
+            console.log(`🗑️  Удалён: ${actualFilename}`);
           }
         }, 300000);
 
@@ -934,14 +1571,16 @@ app.post('/api/download-youtube', async (req, res) => {
 
   } catch (error) {
     if (responseSent) return;
-    console.error('❌ Ошибка:', error);
+    console.error('❌ Ошибка в /api/download-youtube:', error);
+    console.error('Стек ошибки:', error.stack);
     responseSent = true;
     res.status(500).json({ 
       error: 'Не удалось скачать видео',
-      details: error.message 
+      details: error.message || 'Неизвестная ошибка',
+      type: error.constructor.name
     });
   }
-});
+}));
 
 // Извлечение ID видео из URL
 function extractVideoId(url) {
@@ -1074,13 +1713,17 @@ app.post('/api/generate-scenario', async (req, res) => {
     console.log('🤖 Отправка запроса в Gemini...');
     
     // Используем правильный API как в geminiService.ts
+    // ВАЖНО: Снижаем температуру для строгого следования правилам из паспорта стиля
+    // Небольшая вариативность между версиями, но всегда LOW для точности
+    const temperature = version === 1 ? 0.2 : version === 2 ? 0.3 : 0.4;
+    
     const response = await ai.models.generateContent({
       model: 'gemini-2.0-flash-exp',
       contents: {
         parts: [{ text: prompt }]
       },
       config: {
-        temperature: 0.7,
+        temperature: temperature,
       }
     });
     
@@ -1136,7 +1779,7 @@ function createScenarioPrompt(passport, topic, version) {
   const speechPatterns = passport.style_analysis?.speech_patterns;
   const transcript = passport.transcript || '';
   
-  return `⚠️ КРИТИЧЕСКИ ВАЖНО: Ты должен создать СЦЕНАРИЙ ВИДЕО, а НЕ паспорт стиля! Это НЕ анализ, а готовый сценарий для съемки!
+  return `⚠️⚠️⚠️ КРИТИЧЕСКИ ВАЖНО: Ты должен создать СЦЕНАРИЙ ВИДЕО, а НЕ паспорт стиля! Это НЕ анализ, а готовый сценарий для съемки!
 
 Ты — профессиональный сценарист для коротких видео (Shorts/Reels/TikTok).
 
@@ -1154,22 +1797,60 @@ ${transcript ? `\n📝 ТРАНСКРИПЦИЯ ОРИГИНАЛЬНОГО ВИ�
 ${speechPatterns ? `\n🗣️ ПАТТЕРНЫ РЕЧИ АВТОРА:\n- Частые фразы: ${speechPatterns.common_phrases?.join(', ') || 'нет'}\n- Слова-паразиты: ${speechPatterns.filler_words?.join(', ') || 'нет'}\n- Средняя длина предложения: ${speechPatterns.average_sentence_length || 0} слов\n` : ''}
 
 ═══════════════════════════════════════════════════════════════════
-✅ ОБЯЗАТЕЛЬНО ДЕЛАТЬ (DO) - ПРИМЕНЯЙ В КАЖДОМ СЕГМЕНТЕ:
+✅ ОБЯЗАТЕЛЬНО ДЕЛАТЬ (DO) - СТРОГО ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА:
 ═══════════════════════════════════════════════════════════════════
 ${doRules.length > 0 ? doRules.map((rule, idx) => `${idx + 1}. ${rule}`).join('\n') : 'Нет правил Do'}
-${doRules.length > 0 ? '\n⚠️ ВАЖНО: Каждое правило из списка DO должно быть применено хотя бы в одном сегменте сценария!' : ''}
+${doRules.length > 0 ? `
+
+🚨 КРИТИЧЕСКИ ВАЖНО - ПРОВЕРКА ПРАВИЛ DO:
+Ты ОБЯЗАН применить КАЖДОЕ правило из списка DO.
+- Каждое правило должно быть явно указано в поле "Правила:" соответствующего сегмента
+- В конце сценария ОБЯЗАТЕЛЬНО добавь секцию "ПРОВЕРКА СОБЛЮДЕНИЯ ПРАВИЛ DO:" где перечислишь:
+  * Какое правило DO применено
+  * В каком сегменте (таймкод)
+  * Как именно применено (цитата из сценария)
+- Если хотя бы ОДНО правило DO не применено - сценарий считается НЕПРАВИЛЬНЫМ!` : ''}
 
 ═══════════════════════════════════════════════════════════════════
-❌ СТРОГО ЗАПРЕЩЕНО (DON'T) - НИКОГДА НЕ ДЕЛАЙ ЭТОГО:
+❌ СТРОГО ЗАПРЕЩЕНО (DON'T) - АБСОЛЮТНЫЙ ЗАПРЕТ:
 ═══════════════════════════════════════════════════════════════════
 ${dontRules.length > 0 ? dontRules.map((rule, idx) => `${idx + 1}. ${rule}`).join('\n') : 'Нет правил Don\'t'}
-${dontRules.length > 0 ? '\n⚠️ ВАЖНО: Ни одно правило из списка DON\'T не должно появиться в сценарии!' : ''}
+${dontRules.length > 0 ? `
+
+🚨 КРИТИЧЕСКИ ВАЖНО - ПРОВЕРКА ПРАВИЛ DON'T:
+Ты НЕ ДОЛЖЕН делать НИЧЕГО из списка DON'T.
+- Если хотя бы ОДНО действие из списка DON'T появится в сценарии - сценарий ПРОВАЛЕН!
+- Перед отправкой ответа ОБЯЗАТЕЛЬНО перечитай сценарий и убедись, что НИ ОДНО правило DON'T не нарушено!` : ''}
 
 ═══════════════════════════════════════════════════════════════════
-📋 ПРАВИЛА ИМИТАЦИИ (GENERATION RULES) - ПРИМЕНЯЙ ВСЕ:
+📋 ПРАВИЛА ИМИТАЦИИ (GENERATION RULES) - СТРОГО ОБЯЗАТЕЛЬНЫЕ:
 ═══════════════════════════════════════════════════════════════════
 ${generationRules.length > 0 ? generationRules.map((rule, idx) => `${idx + 1}. ${rule}`).join('\n') : 'Правила не указаны'}
-${generationRules.length > 0 ? '\n⚠️ ВАЖНО: Каждое правило должно быть применено хотя бы в одном сегменте!' : ''}
+${generationRules.length > 0 ? `
+
+🚨 КРИТИЧЕСКИ ВАЖНО - ПРОВЕРКА GENERATION RULES:
+Ты ОБЯЗАН применить КАЖДОЕ правило имитации.
+- Каждое правило должно быть явно указано в поле "Правила:" соответствующего сегмента
+- В конце сценария ОБЯЗАТЕЛЬНО добавь секцию "ПРОВЕРКА СОБЛЮДЕНИЯ GENERATION RULES:" где перечислишь:
+  * Какое правило применено
+  * В каком сегменте (таймкод)
+  * Как именно применено (цитата из сценария)
+- Если хотя бы ОДНО правило не применено - сценарий считается НЕПРАВИЛЬНЫМ!` : ''}
+
+═══════════════════════════════════════════════════════════════════
+🎬 ОБЯЗАТЕЛЬНЫЕ ФОРМУЛЫ АВТОРА (СТРОГО ПРИМЕНЯЙ):
+═══════════════════════════════════════════════════════════════════
+${passport.style_template?.hook_formula ? `🎣 HOOK (00:00-00:05): ${passport.style_template.hook_formula}
+   👉 Это ОБЯЗАТЕЛЬНАЯ формула для hook! Применяй ТОЧНО так!` : ''}
+
+${passport.style_template?.climax_formula ? `🔥 CLIMAX: ${passport.style_template.climax_formula}
+   👉 Это ОБЯЗАТЕЛЬНАЯ формула для кульминации! Применяй ТОЧНО так!` : ''}
+
+${passport.style_template?.cta_formula ? `📢 CTA (финал): ${passport.style_template.cta_formula}
+   👉 Это ОБЯЗАТЕЛЬНАЯ формула для CTA! Применяй ТОЧНО так!` : ''}
+
+${passport.style_template?.mandatory_elements?.length > 0 ? `⚡ ОБЯЗАТЕЛЬНЫЕ ЭЛЕМЕНТЫ (должны быть в сценарии):
+${passport.style_template.mandatory_elements.map((elem, idx) => `   ${idx + 1}. ${elem}`).join('\n')}` : ''}
 
 ═══════════════════════════════════════════════════════════════════
 🎬 СТИЛЬ И ШАБЛОН АВТОРА (КОПИРУЙ ТОЧНО):
@@ -1178,7 +1859,7 @@ ${generationRules.length > 0 ? '\n⚠️ ВАЖНО: Каждое правило
    - Архетип: ${passport.tone_of_voice?.archetype || 'не указан'}
    - Настроение: ${passport.tone_of_voice?.mood?.join(', ') || 'не указано'}
    - Формальность: ${passport.tone_of_voice?.formality_level_0_10 || 5}/10
-   - Сигнатурные фразы: ${passport.tone_of_voice?.signature_phrases?.join(', ') || 'нет'} ${passport.tone_of_voice?.signature_phrases?.length > 0 ? '← ОБЯЗАТЕЛЬНО используй эти фразы!' : ''}
+   - Сигнатурные фразы: ${passport.tone_of_voice?.signature_phrases?.join(', ') || 'нет'} ${passport.tone_of_voice?.signature_phrases?.length > 0 ? '← ОБЯЗАТЕЛЬНО используй минимум ' + Math.min(3, passport.tone_of_voice.signature_phrases.length) + ' фразы!' : ''}
    - Обращения к зрителю: ${passport.tone_of_voice?.direct_address_patterns?.join(', ') || 'нет'}
 
 2. ТЕМП РЕЧИ:
@@ -1198,66 +1879,139 @@ ${passport.structure?.map(s => `   - ${s.part}: ${s.t_start}-${s.t_end} (${s.des
 ${passport.retention_patterns?.map(p => `   - ${p.pattern}: ${p.how_it_looks_in_text} (${p.where_in_video.join(', ')})`).join('\n') || '   - Нет паттернов'}
 
 ═══════════════════════════════════════════════════════════════════
-📝 ФОРМАТ ВЫВОДА (ОБЯЗАТЕЛЬНО соблюдай этот формат, НЕ возвращай JSON!):
+📝 ФОРМАТ ВЫВОДА (СТРОГО ОБЯЗАТЕЛЬНЫЙ, НЕ возвращай JSON!):
 ═══════════════════════════════════════════════════════════════════
-[00:00-00:05]
-Кадр: [Описание визуала в ТОЧНОМ стиле автора, используя его типы кадров и монтаж]
-Текст: [Хук/текст в ТОЧНОМ стиле автора, используя его сигнатурные фразы, тон и темп речи]
-Правила: [Список ВСЕХ примененных правил из DO, DON'T и GENERATION RULES, например: "DO 1: Начинать с крика", "Правило 1: Начинать с интригующей завязки"]
 
-[00:05-00:15]
-Кадр: [Описание визуала в стиле автора]
-Текст: [Текст в стиле автора]
-Правила: [Список примененных правил]
+Для КАЖДОГО сегмента сценария используй этот формат:
 
-[00:15-00:30]
-Кадр: [Описание визуала в стиле автора]
-Текст: [Текст в стиле автора]
-Правила: [Список примененных правил]
+[00:00-00:05] HOOK
+Кадр: [Описание визуала в ТОЧНОМ стиле автора: тип кадра, движение камеры, объекты, действия]
+Текст: [Хук/текст в ТОЧНОМ стиле автора со всеми сигнатурными фразами и паттернами речи]
+Текст на экране: [Если есть - точный текст, стиль, позиция, как в стиле автора]
+Примененные DO: [DO 1 - как применено, DO 3 - как применено, ...]
+Примененные GENERATION RULES: [Правило 2 - как применено, Правило 5 - как применено, ...]
+Паттерны удержания: [Какие паттерны из passport.retention_patterns использованы]
 
-[00:30-00:45]
-Кадр: [Описание визуала в стиле автора]
-Текст: [Текст в стиле автора]
-Правила: [Список примененных правил]
+[00:05-00:15] SETUP
+Кадр: [...]
+Текст: [...]
+Текст на экране: [...]
+Примененные DO: [...]
+Примененные GENERATION RULES: [...]
+Паттерны удержания: [...]
 
-[00:45-00:60]
-Кадр: [Описание визуала в стиле автора]
-Текст: [Текст/CTA в стиле автора]
-Правила: [Список примененных правил]
+[00:15-00:30] MAIN (часть 1)
+Кадр: [...]
+Текст: [...]
+Текст на экране: [...]
+Примененные DO: [...]
+Примененные GENERATION RULES: [...]
+Паттерны удержания: [...]
+
+[00:30-00:45] MAIN (часть 2)
+Кадр: [...]
+Текст: [...]
+Текст на экране: [...]
+Примененные DO: [...]
+Примененные GENERATION RULES: [...]
+Паттерны удержания: [...]
+
+[00:45-00:60] CLIMAX + CTA
+Кадр: [...]
+Текст: [...]
+Текст на экране: [...]
+Примененные DO: [...]
+Примененные GENERATION RULES: [...]
+Паттерны удержания: [...]
 
 ═══════════════════════════════════════════════════════════════════
-⚠️ КРИТИЧЕСКИ ВАЖНЫЕ ТРЕБОВАНИЯ:
+🔍 ОБЯЗАТЕЛЬНАЯ ПРОВЕРКА СОБЛЮДЕНИЯ ПРАВИЛ (добавь в конце):
 ═══════════════════════════════════════════════════════════════════
-1. ТЕКСТ ДОЛЖЕН БЫТЬ В ТОЧНОМ СТИЛЕ АВТОРА:
-   - Используй сигнатурные фразы автора: ${passport.tone_of_voice?.signature_phrases?.join(', ') || 'нет'}
-   - Копируй темп речи: ${passport.speech_pace?.pace_label || 'medium'}
-   - Используй тот же тон: ${passport.tone_of_voice?.archetype || 'neutral'}
-   ${speechPatterns?.common_phrases?.length > 0 ? `- Используй частые фразы автора: ${speechPatterns.common_phrases.join(', ')}` : ''}
-   ${speechPatterns?.filler_words?.length > 0 ? `- Используй слова-паразиты автора: ${speechPatterns.filler_words.join(', ')}` : ''}
 
-2. ВИЗУАЛ ДОЛЖЕН БЫТЬ В ТОЧНОМ СТИЛЕ АВТОРА:
-   - Используй типы кадров: ${passport.visual_style?.shot_types?.join(', ') || 'разные планы'}
-   - Применяй стиль монтажа: ${passport.visual_style?.editing || 'не указан'}
-   - Добавляй текст на экран в стиле: ${passport.visual_style?.on_screen_text_style || 'белый текст'}
+✅ ПРОВЕРКА DO ПРАВИЛ:
+${doRules.length > 0 ? doRules.map((rule, idx) => `DO ${idx + 1}: [укажи в каком сегменте и как применено]`).join('\n') : 'Нет DO правил'}
 
-3. СТРУКТУРА ДОЛЖНА СЛЕДОВАТЬ ШАБЛОНУ АВТОРА:
-   - Следуй структуре: ${passport.structure?.map(s => s.part).join(' → ') || 'hook → setup → main → climax → cta'}
-   - Используй паттерны удержания в нужных местах
+✅ ПРОВЕРКА GENERATION RULES:
+${generationRules.length > 0 ? generationRules.map((rule, idx) => `Правило ${idx + 1}: [укажи в каком сегменте и как применено]`).join('\n') : 'Нет Generation Rules'}
 
-4. ПРАВИЛА DO/DON'T ОБЯЗАТЕЛЬНЫ:
-   - ВСЕ правила из DO должны быть применены
-   - НИ ОДНО правило из DON'T не должно появиться
+❌ ПРОВЕРКА DON'T ПРАВИЛ (убедись, что НИ ОДНО не нарушено):
+${dontRules.length > 0 ? dontRules.map((rule, idx) => `DON'T ${idx + 1}: [подтверди, что НЕ нарушено]`).join('\n') : 'Нет DON\'T правил'}
 
-5. В ПОЛЕ "Правила:" указывай:
-   - Какие правила DO применены (например: "DO 1: Начинать с крика")
-   - Какие правила GENERATION RULES применены (например: "Правило 1: Начинать с интригующей завязки")
-   - НЕ указывай правила DON'T (они не должны применяться)
+═══════════════════════════════════════════════════════════════════
+🚨🚨🚨 КРИТИЧЕСКИ ВАЖНЫЕ ТРЕБОВАНИЯ (НЕСОБЛЮДЕНИЕ = ПРОВАЛ):
+═══════════════════════════════════════════════════════════════════
 
-ВАРИАНТ ${version}: Создай ${version === 1 ? 'классический' : version === 2 ? 'более креативный' : 'альтернативный'} вариант сценария, но ВСЕГДА в стиле автора.
+1. СТРОГОЕ СОБЛЮДЕНИЕ СТИЛЯ АВТОРА В ТЕКСТЕ:
+   ${passport.tone_of_voice?.signature_phrases?.length > 0 ? `✓ ОБЯЗАТЕЛЬНО используй сигнатурные фразы: ${passport.tone_of_voice.signature_phrases.join(', ')}
+   ✓ Минимум ${Math.min(3, passport.tone_of_voice.signature_phrases.length)} фразы должны появиться в сценарии` : ''}
+   ✓ Темп речи СТРОГО: ${passport.speech_pace?.pace_label || 'medium'} (${passport.speech_pace?.wpm_estimate || 150} слов/мин)
+   ✓ Тон и архетип: ${passport.tone_of_voice?.archetype || 'neutral'}
+   ✓ Формальность: ${passport.tone_of_voice?.formality_level_0_10 || 5}/10 - НЕ отклоняйся!
+   ${speechPatterns?.common_phrases?.length > 0 ? `✓ Используй частые фразы: ${speechPatterns.common_phrases.join(', ')}` : ''}
+   ${speechPatterns?.filler_words?.length > 0 ? `✓ Добавляй слова-паразиты автора: ${speechPatterns.filler_words.join(', ')}` : ''}
+   ${passport.tone_of_voice?.direct_address_patterns?.length > 0 ? `✓ Обращайся к зрителю как автор: ${passport.tone_of_voice.direct_address_patterns.join(', ')}` : ''}
 
-⚠️ НЕ ВОЗВРАЩАЙ JSON! ВОЗВРАЩАЙ ТОЛЬКО ТЕКСТОВЫЙ СЦЕНАРИЙ В ФОРМАТЕ ВЫШЕ!
+2. СТРОГОЕ СОБЛЮДЕНИЕ ВИЗУАЛЬНОГО СТИЛЯ:
+   ✓ Типы кадров ТОЛЬКО: ${passport.visual_style?.shot_types?.join(', ') || 'крупный план, средний план'}
+   ✓ Стиль монтажа: ${passport.visual_style?.editing || 'быстрые переходы'}
+   ✓ Текст на экране: ${passport.visual_style?.on_screen_text_style || 'белый текст с тенью'}
+   ✓ Действия персонажа: ${passport.visual_style?.typical_actions?.join(', ') || 'энергичные жесты'}
 
-Начни генерацию сценария прямо сейчас, полностью копируя стиль и шаблон автора:`;
+3. СТРОГОЕ СЛЕДОВАНИЕ СТРУКТУРЕ:
+   ✓ Структура ТОЧНО: ${passport.structure?.map(s => `${s.part} (${s.t_start}-${s.t_end})`).join(' → ') || 'hook → setup → main → climax → cta'}
+   ${passport.structure?.length > 0 ? `✓ Для каждого сегмента применяй описанные приемы удержания:
+${passport.structure.map(s => `   - ${s.part}: ${s.why_it_holds?.slice(0, 2).join(', ') || 'удерживает внимание'}`).join('\n')}` : ''}
+
+4. АБСОЛЮТНАЯ ОБЯЗАТЕЛЬНОСТЬ DO/DON'T/GENERATION RULES:
+   🚨 ВСЕ ${doRules.length} правил DO ОБЯЗАНЫ быть применены
+   🚨 ВСЉ ${generationRules.length} GENERATION RULES ОБЯЗАНЫ быть применены
+   🚨 НИ ОДНО из ${dontRules.length} правил DON'T НЕ ДОЛЖНО появиться
+   🚨 Каждое примененное правило ОБЯЗАТЕЛЬНО указывай в соответствующем поле сегмента
+
+5. ОБЯЗАТЕЛЬНАЯ СТРУКТУРА КАЖДОГО СЕГМЕНТА:
+   Каждый сегмент ОБЯЗАН содержать:
+   ✓ Кадр: детальное описание визуала
+   ✓ Текст: речь в стиле автора
+   ✓ Текст на экране: если используется
+   ✓ Примененные DO: конкретные номера и как применены
+   ✓ Примененные GENERATION RULES: конкретные номера и как применены
+   ✓ Паттерны удержания: какие из ${passport.retention_patterns?.length || 0} паттернов использованы
+
+6. ФИНАЛЬНАЯ ПРОВЕРКА (ОБЯЗАТЕЛЬНА В КОНЦЕ СЦЕНАРИЯ):
+   ✓ Секция "ПРОВЕРКА DO ПРАВИЛ" - для КАЖДОГО DO правила
+   ✓ Секция "ПРОВЕРКА GENERATION RULES" - для КАЖДОГО правила
+   ✓ Секция "ПРОВЕРКА DON'T ПРАВИЛ" - подтверждение что НИ ОДНО не нарушено
+
+═══════════════════════════════════════════════════════════════════
+🎨 ВАРИАНТ ${version} - УНИКАЛЬНОСТЬ В РАМКАХ СТРОГИХ ПРАВИЛ:
+═══════════════════════════════════════════════════════════════════
+${version === 1 ? 
+  'Это ПЕРВЫЙ (эталонный) вариант сценария. Создай сценарий, который МАКСИМАЛЬНО ТОЧНО следует ВСЕМ правилам и шаблону автора. Это должен быть эталонный пример применения ВСЕХ DO, GENERATION RULES и паттернов.' :
+  version === 2 ?
+  'Это ВТОРОЙ (креативный) вариант сценария. ОБЯЗАТЕЛЬНО применяй ВСЕ DO и GENERATION RULES, но используй более неожиданные примеры и повороты темы. ПРАВИЛА НЕИЗМЕННЫ - меняется только тема и примеры!' :
+  version === 3 ?
+  'Это ТРЕТИЙ (альтернативный) вариант сценария. ОБЯЗАТЕЛЬНО применяй ВСЕ DO и GENERATION RULES, экспериментируй с углом зрения на тему, но СТРОГО соблюдай все правила и стиль автора!' :
+  `Это ВАРИАНТ ${version}. ОБЯЗАТЕЛЬНО применяй ВСЕ DO и GENERATION RULES. Уникальность в ${version % 2 === 0 ? 'динамике подачи' : 'деталях примеров'}, но ПРАВИЛА и СТИЛЬ неизменны!`
+}
+
+🚨🚨🚨 КРИТИЧЕСКИ ВАЖНО ПЕРЕД НАЧАЛОМ ГЕНЕРАЦИИ - КОНТРОЛЬНЫЙ СПИСОК:
+1. ✅ Прочитай ВСЕ ${doRules.length} правил DO - КАЖДОЕ должно быть применено
+2. ✅ Прочитай ВСЕ ${generationRules.length} GENERATION RULES - КАЖДОЕ должно быть применено  
+3. ✅ Прочитай ВСЕ ${dontRules.length} правил DON'T - НИ ОДНО не должно появиться
+4. ✅ Прочитай ВСЕ ${passport.retention_patterns?.length || 0} паттернов удержания - используй их
+5. ✅ ОБЯЗАТЕЛЬНО применяй ФОРМУЛЫ из style_template:
+   ${passport.style_template?.hook_formula ? `- HOOK FORMULA: ${passport.style_template.hook_formula}` : '- Нет hook formula'}
+   ${passport.style_template?.climax_formula ? `- CLIMAX FORMULA: ${passport.style_template.climax_formula}` : '- Нет climax formula'}
+   ${passport.style_template?.cta_formula ? `- CTA FORMULA: ${passport.style_template.cta_formula}` : '- Нет cta formula'}
+6. ✅ ОБЯЗАТЕЛЬНО включи ${passport.style_template?.mandatory_elements?.length || 0} обязательных элементов
+7. ✅ Используй минимум ${passport.tone_of_voice?.signature_phrases?.length > 0 ? Math.min(3, passport.tone_of_voice.signature_phrases.length) : 0} сигнатурных фраз автора
+8. ✅ Соблюдай темп речи: ${passport.speech_pace?.wpm_estimate || 150} слов/мин (${passport.speech_pace?.pace_label || 'medium'})
+
+⚠️⚠️⚠️ НЕ ВОЗВРАЩАЙ JSON! ВОЗВРАЩАЙ ТОЛЬКО ТЕКСТОВЫЙ СЦЕНАРИЙ!
+⚠️⚠️⚠️ В КОНЦЕ ОБЯЗАТЕЛЬНО добавь секции ПРОВЕРКИ ПРАВИЛ!
+⚠️⚠️⚠️ КАЖДЫЙ сегмент должен содержать поля "Примененные DO:" и "Примененные GENERATION RULES:"!
+
+Начни генерацию сценария прямо сейчас. Сначала мысленно составь список всех правил, которые нужно применить, затем создай сценарий, применяя КАЖДОЕ правило:`;
 }
 
 // Извлечение инсайтов из паспорта для промпта
@@ -1335,6 +2089,40 @@ function extractInsights(passport) {
     if (sp.average_sentence_length > 0) {
       insights.push(`- 🗣️ Средняя длина предложения: ${sp.average_sentence_length} слов`);
     }
+  }
+  
+  // Шаблон стиля (style_template) - критически важно для точного копирования
+  if (passport.style_template) {
+    insights.push(`\n🎯 ШАБЛОН СТИЛЯ АВТОРА (ТОЧНАЯ ФОРМУЛА УСПЕХА):`);
+    if (passport.style_template.template_description) {
+      insights.push(`  📖 Описание: ${passport.style_template.template_description}`);
+    }
+    if (passport.style_template.hook_formula) {
+      insights.push(`  🎣 HOOK FORMULA (ОБЯЗАТЕЛЬНО применяй): ${passport.style_template.hook_formula}`);
+    }
+    if (passport.style_template.climax_formula) {
+      insights.push(`  🔥 CLIMAX FORMULA (ОБЯЗАТЕЛЬНО применяй): ${passport.style_template.climax_formula}`);
+    }
+    if (passport.style_template.cta_formula) {
+      insights.push(`  📢 CTA FORMULA (ОБЯЗАТЕЛЬНО применяй): ${passport.style_template.cta_formula}`);
+    }
+    if (passport.style_template.mandatory_elements?.length > 0) {
+      insights.push(`  ⚡ ОБЯЗАТЕЛЬНЫЕ ЭЛЕМЕНТЫ В КАЖДОМ ВИДЕО:`);
+      passport.style_template.mandatory_elements.forEach((elem, idx) => {
+        insights.push(`    ${idx + 1}. ${elem}`);
+      });
+    }
+    if (passport.style_template.step_by_step_structure?.length > 0) {
+      insights.push(`  📝 ПОШАГОВАЯ СТРУКТУРА АВТОРА:`);
+      passport.style_template.step_by_step_structure.forEach((step, idx) => {
+        insights.push(`    Шаг ${idx + 1}: ${step}`);
+      });
+    }
+  }
+  
+  // Целевая аудитория - важно для тона и стиля
+  if (passport.target_audience) {
+    insights.push(`\n👥 ЦЕЛЕВАЯ АУДИТОРИЯ (учитывай при создании): ${passport.target_audience}`);
   }
   
   return insights.join('\n');
@@ -1519,21 +2307,65 @@ function parseScenarioResponse(text, topic, version) {
 
 // Health check
 app.get('/health', (req, res) => {
-  // Проверяем наличие yt-dlp в системе
-  const { execSync } = require('child_process');
-  let ytdlpStatus = 'not found';
-  try {
-    execSync(`${YT_DLP_CMD} --version`, { stdio: 'ignore' });
-    ytdlpStatus = 'found';
-  } catch (e) {
-    // yt-dlp не найден
+  const check = checkYtDlpAvailable();
+  let version = 'unknown';
+  
+  if (check.available) {
+    try {
+      if (check.method === 'python') {
+        version = execSync(`${check.command} -m yt_dlp --version`, { encoding: 'utf-8' }).trim();
+      } else if (check.method === 'local') {
+        version = execSync(`"${check.command}" --version`, { encoding: 'utf-8' }).trim();
+      } else {
+        version = execSync(`${check.command} --version`, { encoding: 'utf-8' }).trim();
+      }
+    } catch (e) {
+      version = 'unknown';
+    }
+  }
+  
+  // Проверяем ffmpeg
+  let ffmpegAvailable = false;
+  let ffmpegMethod = 'none';
+  if (fs.existsSync(FFMPEG_LOCAL)) {
+    ffmpegAvailable = true;
+    ffmpegMethod = 'local';
+  } else {
+    try {
+      execSync('ffmpeg -version', { stdio: 'ignore' });
+      ffmpegAvailable = true;
+      ffmpegMethod = 'system';
+    } catch (e) {
+      // ffmpeg не найден
+    }
   }
   
   res.json({ 
     status: 'OK', 
     service: 'VideoMind API',
-    ytdlp: ytdlpStatus
+    ytdlp: {
+      available: check.available,
+      method: check.method || 'none',
+      version: version
+    },
+    ffmpeg: {
+      available: ffmpegAvailable,
+      method: ffmpegMethod
+    }
   });
+});
+
+// Глобальный обработчик ошибок для всех маршрутов
+app.use((err, req, res, next) => {
+  console.error('❌ Необработанная ошибка:', err);
+  console.error('Стек ошибки:', err.stack);
+  if (!res.headersSent) {
+    res.status(500).json({ 
+      error: 'Внутренняя ошибка сервера',
+      details: err.message,
+      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
+  }
 });
 
 app.listen(PORT, () => {
@@ -1541,12 +2373,39 @@ app.listen(PORT, () => {
   console.log(`📁 Временные файлы: ${TEMP_DIR}`);
   
   // Проверяем наличие yt-dlp
-  const { execSync } = require('child_process');
-  try {
-    const version = execSync(`${YT_DLP_CMD} --version`, { encoding: 'utf-8' }).trim();
-    console.log(`✅ yt-dlp найден: версия ${version}`);
-  } catch (e) {
+  const check = checkYtDlpAvailable();
+  if (check.available) {
+    try {
+      let version;
+      if (check.method === 'python') {
+        version = execSync(`${check.command} -m yt_dlp --version`, { encoding: 'utf-8' }).trim();
+      } else if (check.method === 'local') {
+        version = execSync(`"${check.command}" --version`, { encoding: 'utf-8' }).trim();
+      } else {
+        version = execSync(`${check.command} --version`, { encoding: 'utf-8' }).trim();
+      }
+      console.log(`✅ yt-dlp найден (${check.method}): версия ${version}`);
+      
+      // Проверяем ffmpeg
+      if (fs.existsSync(FFMPEG_LOCAL)) {
+        console.log(`✅ ffmpeg найден (локальный): ${FFMPEG_LOCAL}`);
+      } else {
+        try {
+          execSync('ffmpeg -version', { stdio: 'ignore' });
+          console.log(`✅ ffmpeg найден (системный)`);
+        } catch (e) {
+          console.log(`⚠️  ffmpeg не найден (не критично, но может понадобиться для некоторых форматов)`);
+        }
+      }
+    } catch (e) {
+      console.log(`✅ yt-dlp найден (${check.method}), но версию определить не удалось`);
+    }
+  } else {
     console.log(`❌ yt-dlp НЕ НАЙДЕН. Установите: pip install yt-dlp`);
+    console.log(`   Или скачайте бинарник: https://github.com/yt-dlp/yt-dlp/releases`);
+    if (fs.existsSync(YT_DLP_LOCAL)) {
+      console.log(`   ⚠️  Локальный yt-dlp.exe найден, но не запускается. Проверьте права доступа.`);
+    }
   }
   
   console.log(`🔗 POST /api/download-youtube для скачивания`);

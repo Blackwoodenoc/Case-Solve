@@ -1,7 +1,7 @@
 
 import React, { useRef, useState, useCallback } from 'react';
 import { VideoFile } from '../types';
-import { Upload, X, Loader2, AlertCircle, Globe, Youtube, Instagram, Music2, Eye, MessageCircle, FileText } from 'lucide-react';
+import { Upload, X, Loader2, AlertCircle, Globe, Youtube, Instagram, Music2, Eye, MessageCircle, FileText, Download } from 'lucide-react';
 
 interface VideoPlayerProps {
   video: VideoFile | null;
@@ -20,12 +20,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ video, onVideoSelect, 
   const [url, setUrl] = useState('');
   const [isFetching, setIsFetching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorSuggestions, setErrorSuggestions] = useState<string[]>([]);
   const [isLoadingComments, setIsLoadingComments] = useState(false);
   const [comments, setComments] = useState<any[]>([]);
   const [showComments, setShowComments] = useState(false);
   const [isCreatingPassport, setIsCreatingPassport] = useState(false);
   const [stylePassport, setStylePassport] = useState<any>(null);
   const [showPassport, setShowPassport] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -65,12 +67,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ video, onVideoSelect, 
     const isTikTok = fullUrl.includes('tiktok.com');
     const isSocial = isYouTube || isInstagram || isTikTok || fullUrl.includes('vimeo.com');
 
-    // Для YouTube, Instagram, TikTok - скачиваем автоматически
-    if (isYouTube || isInstagram || isTikTok) {
+    // Для YouTube сначала показываем встроенный плеер, потом можно скачать
+    if (isYouTube) {
+      // Сначала просто открываем встроенный плеер
+      await onRemoteUrlSelect(fullUrl);
+      setUrl('');
+      setError(null);
+      setErrorSuggestions([]);
+      setIsFetching(false);
+      return;
+    }
+
+    // Для Instagram, TikTok - скачиваем автоматически
+    if (isInstagram || isTikTok) {
       setIsFetching(true);
       setError(null);
+      setErrorSuggestions([]);
       
-      const platformName = isYouTube ? 'YouTube' : isInstagram ? 'Instagram' : 'TikTok';
+      const platformName = isInstagram ? 'Instagram' : 'TikTok';
       
       console.log(`🔄 Отправка запроса на скачивание ${platformName}:`, fullUrl);
       
@@ -85,14 +99,18 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ video, onVideoSelect, 
 
         if (!response.ok) {
           let errorMessage = 'Ошибка скачивания';
+          let errorData: any = {};
           try {
-            const errorData = await response.json();
+            errorData = await response.json();
             errorMessage = errorData.error || errorMessage;
           } catch (jsonErr) {
             // Если не удалось распарсить JSON, используем статус
             errorMessage = `HTTP ${response.status}: ${response.statusText}`;
           }
-          throw new Error(errorMessage);
+          const error = new Error(errorMessage) as any;
+          error.suggestions = errorData.suggestions;
+          error.errorCode = errorData.errorCode;
+          throw error;
         }
 
         let data;
@@ -115,11 +133,28 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ video, onVideoSelect, 
         onVideoSelect(file);
         setUrl('');
         setError(null);
+        setErrorSuggestions([]);
         setIsFetching(false);
         return;
       } catch (err: any) {
         console.error('Ошибка автоскачивания:', err);
-        setError(`${platformName}: ${err.message}`);
+        let errorMessage = `${platformName}: ${err.message}`;
+        
+        // Специальная обработка ошибки подключения
+        if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.message.includes('fetch')) {
+          errorMessage = `Не удалось подключиться к серверу. Убедитесь, что сервер запущен на порту 3003.`;
+          setErrorSuggestions([
+            'Запустите сервер: npm run dev:server',
+            'Или запустите всё сразу: npm run dev:all',
+            'Проверьте, что сервер работает на http://localhost:3003'
+          ]);
+        } else if (err.suggestions && Array.isArray(err.suggestions) && err.suggestions.length > 0) {
+          setErrorSuggestions(err.suggestions);
+        } else {
+          setErrorSuggestions([]);
+        }
+        
+        setError(errorMessage);
         setIsFetching(false);
         return;
       }
@@ -137,6 +172,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ video, onVideoSelect, 
 
     setIsFetching(true);
     setError(null);
+    setErrorSuggestions([]);
 
     for (let i = 0; i < PROXIES.length; i++) {
       try {
@@ -162,6 +198,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ video, onVideoSelect, 
     await onRemoteUrlSelect(fullUrl);
     setUrl('');
     setIsFetching(false);
+    setErrorSuggestions([]);
     setError('Прямая загрузка не удалась. Ссылка добавлена для глубокого AI анализа.');
   };
 
@@ -268,9 +305,104 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ video, onVideoSelect, 
       setIsCreatingPassport(false);
     } catch (err: any) {
       console.error('❌ Ошибка создания паспорта:', err);
-      setError(`Паспорт стиля: ${err.message}`);
+      let errorMessage = `Паспорт стиля: ${err.message}`;
+      
+      // Специальная обработка ошибки подключения
+      if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.message.includes('fetch')) {
+        errorMessage = 'Паспорт стиля: Не удалось подключиться к серверу. Убедитесь, что сервер запущен на порту 3003. Запустите: npm run dev:server';
+      }
+      
+      setError(errorMessage);
       setIsCreatingPassport(false);
     }
+  };
+
+  // Функция для извлечения YouTube video ID
+  const getYouTubeVideoId = (url: string): string | null => {
+    try {
+      const urlObj = new URL(url.includes('://') ? url : 'https://' + url);
+      
+      // YouTube Shorts
+      if (urlObj.pathname.includes('/shorts/')) {
+        return urlObj.pathname.split('/shorts/')[1].split(/[?&#]/)[0];
+      }
+      
+      // YouTube youtu.be
+      if (urlObj.hostname.includes('youtu.be')) {
+        return urlObj.pathname.slice(1).split(/[?&#]/)[0];
+      }
+      
+      // YouTube youtube.com/watch
+      if (urlObj.searchParams.has('v')) {
+        return urlObj.searchParams.get('v');
+      }
+      
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  // Функция для скачивания YouTube видео
+  const downloadYouTubeVideo = async () => {
+    if (!video?.remoteUrl) return;
+    
+    setIsDownloading(true);
+    setError(null);
+    setErrorSuggestions([]);
+    
+    try {
+      console.log(`🔄 Запуск скачивания YouTube:`, video.remoteUrl);
+      
+      const response = await fetch('http://localhost:3003/api/youtube-full-analysis', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: video.remoteUrl })
+      });
+
+      if (!response.ok) {
+        let errorMessage = 'Ошибка скачивания YouTube';
+        let errorData: any = {};
+        try {
+          errorData = await response.json();
+          errorMessage = errorData.error || errorMessage;
+        } catch (jsonErr) {
+          errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+        }
+        const error = new Error(errorMessage) as any;
+        error.suggestions = errorData.suggestions || [];
+        throw error;
+      }
+
+      const data = await response.json();
+      console.log(`✅ Видео скачано:`, data);
+      
+      setError(null);
+      setErrorSuggestions([]);
+      alert(`✅ Видео успешно скачано!\n\n📊 Метаданные:\n- Комментариев: ${data.metadata?.total_comments || 0}\n- Просмотров: ${data.video_info?.view_count?.toLocaleString() || 0}\n- Лайков: ${data.video_info?.like_count?.toLocaleString() || 0}\n\n📁 Видео сохранено в: ${data.video_file?.folder}\n\n📝 Анализ последних 10 комментариев выполнен.`);
+      
+      } catch (err: any) {
+        console.error('Ошибка скачивания:', err);
+        let errorMessage = `Ошибка скачивания: ${err.message}`;
+        
+        // Специальная обработка ошибки подключения
+        if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.message.includes('fetch')) {
+          errorMessage = 'Не удалось подключиться к серверу. Убедитесь, что сервер запущен на порту 3003.';
+          setErrorSuggestions([
+            'Запустите сервер: npm run dev:server',
+            'Или запустите всё сразу: npm run dev:all',
+            'Проверьте, что сервер работает на http://localhost:3003'
+          ]);
+        } else if (err.suggestions && Array.isArray(err.suggestions) && err.suggestions.length > 0) {
+          setErrorSuggestions(err.suggestions);
+        } else {
+          setErrorSuggestions([]);
+        }
+        
+        setError(errorMessage);
+      } finally {
+        setIsDownloading(false);
+      }
   };
 
   const getPlatformIcon = (remoteUrl?: string) => {
@@ -286,11 +418,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ video, onVideoSelect, 
 
   if (video) {
     const isYouTube = video.remoteUrl?.includes('youtube.com') || video.remoteUrl?.includes('youtu.be');
+    const youtubeVideoId = isYouTube && video.remoteUrl ? getYouTubeVideoId(video.remoteUrl) : null;
     
     return (
       <div className="relative w-full aspect-video bg-slate-900 rounded-xl overflow-hidden shadow-2xl border border-slate-800 group flex items-center justify-center">
         {video.url ? (
           <video src={video.url} controls className="w-full h-full object-contain" />
+        ) : isYouTube && youtubeVideoId ? (
+          // Встроенный YouTube iframe плеер
+          <iframe
+            src={`https://www.youtube.com/embed/${youtubeVideoId}`}
+            className="w-full h-full"
+            frameBorder="0"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+            allowFullScreen
+            title="YouTube video player"
+          />
         ) : (
           <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
             {video.metadata?.thumbnail && (
@@ -326,6 +469,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ video, onVideoSelect, 
 
         {isYouTube && (
           <>
+            <button 
+              onClick={downloadYouTubeVideo}
+              disabled={isDownloading}
+              className="absolute top-4 right-16 p-2.5 bg-slate-950/80 hover:bg-blue-600 text-white rounded-full opacity-0 group-hover:opacity-100 transition-all border border-white/10 shadow-xl z-20 disabled:opacity-50"
+              title="Скачать видео и метаданные"
+            >
+              {isDownloading ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
+                <Download size={16} />
+              )}
+            </button>
+            
             <button 
               onClick={fetchComments}
               disabled={isLoadingComments}
@@ -512,7 +668,32 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ video, onVideoSelect, 
                <p className="text-[10px] text-amber-400 flex items-center gap-1.5 font-medium bg-amber-500/10 p-1.5 rounded border border-amber-500/20">
                  <AlertCircle size={10} /> {error}
                </p>
-               {error.includes('временно ограничил') || error.includes('429') || error.includes('временно недоступен') ? (
+               
+               {/* Показываем suggestions, если они есть */}
+               {errorSuggestions && errorSuggestions.length > 0 && (
+                 <div className="bg-blue-500/10 border border-blue-500/20 rounded p-2 text-[9px] text-blue-300">
+                   <p className="font-bold mb-1.5">💡 Рекомендации:</p>
+                   <ul className="space-y-1 list-disc list-inside">
+                     {errorSuggestions.map((suggestion, idx) => (
+                       <li key={idx} className="text-blue-200">{suggestion}</li>
+                     ))}
+                   </ul>
+                 </div>
+               )}
+               
+               {/* Для YouTube ошибок показываем альтернативные сервисы, если нет suggestions */}
+               {(error.includes('YouTube') || error.includes('youtube')) && (!errorSuggestions || errorSuggestions.length === 0) && (
+                   <div className="bg-blue-500/10 border border-blue-500/20 rounded p-2 text-[9px] text-blue-300">
+                     <p className="font-bold mb-1">🌐 Альтернативные способы скачивания:</p>
+                     <div className="space-y-1">
+                       <a href="https://y2mate.com" target="_blank" rel="noopener noreferrer" className="block hover:text-blue-400 underline">• y2mate.com</a>
+                       <a href="https://savefrom.net" target="_blank" rel="noopener noreferrer" className="block hover:text-blue-400 underline">• savefrom.net</a>
+                       <a href="https://en.savefrom.net" target="_blank" rel="noopener noreferrer" className="block hover:text-blue-400 underline">• en.savefrom.net</a>
+                     </div>
+                   </div>
+                 )}
+                 
+                 {error.includes('временно ограничил') || error.includes('429') || error.includes('временно недоступен') ? (
                  <div className="space-y-2">
                    <div className="bg-blue-500/10 border border-blue-500/20 rounded p-2 text-[9px] text-blue-300">
                      <p className="font-bold mb-1">🌐 Альтернативные способы:</p>
@@ -547,7 +728,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ video, onVideoSelect, 
                      </div>
                    )}
                  </div>
-               ) : null}
+                 ) : null}
              </div>
            )}
            <p className="text-[9px] text-slate-500 mt-2 flex items-center gap-1">

@@ -58,7 +58,14 @@ export const StylePassportViewer: React.FC<StylePassportViewerProps> = ({ passpo
         toggleSection('comments');
       }
     } catch (err: any) {
-      setCommentsError(err.message);
+      let errorMessage = err.message || 'Ошибка загрузки комментариев';
+      
+      // Специальная обработка ошибки подключения
+      if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.message.includes('fetch')) {
+        errorMessage = 'Не удалось подключиться к серверу. Убедитесь, что сервер запущен на порту 3003. Запустите: npm run dev:server';
+      }
+      
+      setCommentsError(errorMessage);
     } finally {
       setIsLoadingComments(false);
     }
@@ -121,7 +128,14 @@ export const StylePassportViewer: React.FC<StylePassportViewerProps> = ({ passpo
       }
     } catch (err: any) {
       console.error('❌ Ошибка генерации сценария:', err);
-      setScenarioError(err.message || 'Неизвестная ошибка при генерации сценария');
+      let errorMessage = err.message || 'Неизвестная ошибка при генерации сценария';
+      
+      // Специальная обработка ошибки подключения
+      if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.message.includes('fetch')) {
+        errorMessage = 'Не удалось подключиться к серверу. Убедитесь, что сервер запущен на порту 3003. Запустите: npm run dev:server';
+      }
+      
+      setScenarioError(errorMessage);
     } finally {
       setIsGeneratingScenario(false);
     }
@@ -148,6 +162,13 @@ export const StylePassportViewer: React.FC<StylePassportViewerProps> = ({ passpo
     text += '📝 ОБЩЕЕ ОПИСАНИЕ\n';
     text += '───────────────────────────────────────────────────────\n';
     text += `${passport.overall_summary}\n\n`;
+    
+    if (passport.target_audience) {
+      text += '───────────────────────────────────────────────────────\n';
+      text += '🎯 ЦЕЛЕВАЯ АУДИТОРИЯ\n';
+      text += '───────────────────────────────────────────────────────\n';
+      text += `${passport.target_audience}\n\n`;
+    }
     
     text += '───────────────────────────────────────────────────────\n';
     text += '🎭 ТОН И ГОЛОС\n';
@@ -230,6 +251,40 @@ export const StylePassportViewer: React.FC<StylePassportViewerProps> = ({ passpo
       text += `  ${i + 1}. ${item}\n`;
     });
     text += '\n';
+    
+    // Шаблон стиля (если есть)
+    if (passport.style_template) {
+      text += '───────────────────────────────────────────────────────\n';
+      text += '🔥 ШАБЛОН СТИЛЯ (ФОРМУЛА УСПЕХА)\n';
+      text += '───────────────────────────────────────────────────────\n';
+      if (passport.style_template.template_description) {
+        text += `Описание: ${passport.style_template.template_description}\n\n`;
+      }
+      if (passport.style_template.step_by_step_structure && passport.style_template.step_by_step_structure.length > 0) {
+        text += 'Пошаговая структура:\n';
+        passport.style_template.step_by_step_structure.forEach((step, i) => {
+          text += `  ${i + 1}. ${step}\n`;
+        });
+        text += '\n';
+      }
+      if (passport.style_template.mandatory_elements && passport.style_template.mandatory_elements.length > 0) {
+        text += 'Обязательные элементы:\n';
+        passport.style_template.mandatory_elements.forEach((elem, i) => {
+          text += `  ${i + 1}. ${elem}\n`;
+        });
+        text += '\n';
+      }
+      if (passport.style_template.hook_formula) {
+        text += `🎣 Формула хука: ${passport.style_template.hook_formula}\n`;
+      }
+      if (passport.style_template.climax_formula) {
+        text += `💥 Формула кульминации: ${passport.style_template.climax_formula}\n`;
+      }
+      if (passport.style_template.cta_formula) {
+        text += `📢 Формула CTA: ${passport.style_template.cta_formula}\n`;
+      }
+      text += '\n';
+    }
     
     text += '───────────────────────────────────────────────────────\n';
     text += '📋 ПРАВИЛА ГЕНЕРАЦИИ\n';
@@ -467,6 +522,13 @@ export const StylePassportViewer: React.FC<StylePassportViewerProps> = ({ passpo
             <p className="text-sm text-slate-300 leading-relaxed">{passport.overall_summary}</p>
           </Section>
 
+          {/* Target Audience */}
+          {passport.target_audience && (
+            <Section id="audience" title="Целевая аудитория" icon={<MessageCircle size={16} className="text-cyan-400" />}>
+              <p className="text-sm text-slate-300 leading-relaxed">{passport.target_audience}</p>
+            </Section>
+          )}
+
       {/* Tone of Voice */}
       <Section id="tone" title="Tone of Voice" icon={<MessageCircle size={16} className="text-purple-400" />}>
         <div className="grid grid-cols-2 gap-3">
@@ -634,6 +696,90 @@ export const StylePassportViewer: React.FC<StylePassportViewerProps> = ({ passpo
           </div>
         </div>
       </Section>
+
+      {/* Style Template - Шаблон стиля */}
+      {passport.style_template && (
+        <Section id="template" title="🔥 Шаблон стиля (Формула успеха)" icon={<Zap size={16} className="text-yellow-400" />}>
+          <div className="space-y-4">
+            {/* Описание шаблона */}
+            {passport.style_template.template_description && (
+              <div>
+                <p className="text-[10px] text-yellow-400 uppercase tracking-wider font-bold mb-2">Описание шаблона</p>
+                <p className="text-xs text-slate-300 leading-relaxed">{passport.style_template.template_description}</p>
+              </div>
+            )}
+
+            {/* Пошаговая структура */}
+            {passport.style_template.step_by_step_structure && passport.style_template.step_by_step_structure.length > 0 && (
+              <div>
+                <p className="text-[10px] text-yellow-400 uppercase tracking-wider font-bold mb-2">Пошаговая структура</p>
+                <ol className="space-y-2">
+                  {passport.style_template.step_by_step_structure.map((step, i) => (
+                    <li key={i} className="text-xs text-slate-300 flex items-start gap-2">
+                      <span className="flex-shrink-0 w-5 h-5 bg-yellow-500/20 border border-yellow-500/40 rounded-full flex items-center justify-center text-[10px] font-bold text-yellow-300">
+                        {i + 1}
+                      </span>
+                      <span>{step}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
+
+            {/* Обязательные элементы */}
+            {passport.style_template.mandatory_elements && passport.style_template.mandatory_elements.length > 0 && (
+              <div>
+                <p className="text-[10px] text-yellow-400 uppercase tracking-wider font-bold mb-2">Обязательные элементы</p>
+                <ul className="space-y-1">
+                  {passport.style_template.mandatory_elements.map((elem, i) => (
+                    <li key={i} className="text-xs text-slate-300 flex items-start gap-2">
+                      <span className="text-yellow-500 mt-0.5">•</span>
+                      <span>{elem}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Паттерны переходов */}
+            {passport.style_template.transition_patterns && passport.style_template.transition_patterns.length > 0 && (
+              <div>
+                <p className="text-[10px] text-yellow-400 uppercase tracking-wider font-bold mb-2">Паттерны переходов</p>
+                <ul className="space-y-1">
+                  {passport.style_template.transition_patterns.map((pattern, i) => (
+                    <li key={i} className="text-xs text-slate-300 flex items-start gap-2">
+                      <span className="text-yellow-500 mt-0.5">↗</span>
+                      <span>{pattern}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Формулы */}
+            <div className="grid grid-cols-1 gap-3">
+              {passport.style_template.hook_formula && (
+                <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3">
+                  <p className="text-[10px] text-yellow-400 uppercase tracking-wider font-bold mb-1">🎣 Формула хука (00:00-00:05)</p>
+                  <p className="text-xs text-slate-300">{passport.style_template.hook_formula}</p>
+                </div>
+              )}
+              {passport.style_template.climax_formula && (
+                <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3">
+                  <p className="text-[10px] text-yellow-400 uppercase tracking-wider font-bold mb-1">💥 Формула кульминации (00:45-00:55)</p>
+                  <p className="text-xs text-slate-300">{passport.style_template.climax_formula}</p>
+                </div>
+              )}
+              {passport.style_template.cta_formula && (
+                <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3">
+                  <p className="text-[10px] text-yellow-400 uppercase tracking-wider font-bold mb-1">📢 Формула CTA (00:55-01:00)</p>
+                  <p className="text-xs text-slate-300">{passport.style_template.cta_formula}</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </Section>
+      )}
 
       {/* Generation Rules */}
       <Section id="rules" title="Правила имитации" icon={<Dna size={16} className="text-purple-400" />}>
@@ -839,7 +985,11 @@ export const StylePassportViewer: React.FC<StylePassportViewerProps> = ({ passpo
                   }}
                 />
                 <button
-                  onClick={() => generateScenario(1)}
+                  onClick={() => {
+                    const existingForTopic = scenarios.filter(s => s.topic === scenarioTopic.trim());
+                    const version = existingForTopic.length === 0 ? 1 : existingForTopic.length + 1;
+                    generateScenario(version);
+                  }}
                   disabled={isGeneratingScenario || !scenarioTopic.trim()}
                   className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-lg transition-all flex items-center gap-2"
                 >
@@ -851,15 +1001,21 @@ export const StylePassportViewer: React.FC<StylePassportViewerProps> = ({ passpo
                   ) : (
                     <>
                       <Sparkles size={14} />
-                      Вариант 1
+                      {scenarios.filter(s => s.topic === scenarioTopic.trim()).length === 0 
+                        ? 'Вариант 1' 
+                        : `Вариант ${scenarios.filter(s => s.topic === scenarioTopic.trim()).length + 1}`}
                     </>
                   )}
                 </button>
                 <button
-                  onClick={() => generateScenario(scenarios.filter(s => s.topic === scenarioTopic.trim()).length + 1)}
+                  onClick={() => {
+                    const existingForTopic = scenarios.filter(s => s.topic === scenarioTopic.trim());
+                    const nextVersion = existingForTopic.length + 1;
+                    generateScenario(nextVersion);
+                  }}
                   disabled={isGeneratingScenario || !scenarioTopic.trim()}
                   className="px-3 py-2 bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 disabled:cursor-not-allowed text-slate-300 text-xs font-semibold rounded-lg transition-all flex items-center gap-1"
-                  title="Создать еще один вариант"
+                  title="Создать еще один вариант на эту же тему"
                 >
                   <Plus size={14} />
                 </button>

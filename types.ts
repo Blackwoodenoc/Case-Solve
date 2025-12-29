@@ -78,10 +78,22 @@ export interface DoAndDont {
   dont: string[];
 }
 
+export interface StyleTemplate {
+  // Четкий шаблон структуры видео от начала до конца
+  template_description: string; // Полное описание шаблона как "формулы успеха"
+  step_by_step_structure: string[]; // Пошаговое описание каждого этапа от начала до конца
+  mandatory_elements: string[]; // Обязательные элементы, которые должны быть в каждом видео
+  transition_patterns: string[]; // Как автор переходит между сегментами
+  hook_formula: string; // Формула хука (что всегда делает в начале)
+  climax_formula: string; // Формула кульминации (что всегда делает в кульминации)
+  cta_formula: string; // Формула CTA (как всегда заканчивает видео)
+}
+
 export interface StylePassport {
   language: string;
   style_passport_version: string;
   overall_summary: string;
+  target_audience?: string; // На какую аудиторию рассчитано видео
   tone_of_voice: ToneOfVoice;
   speech_pace: SpeechPace;
   structure: VideoStructurePart[];
@@ -89,6 +101,7 @@ export interface StylePassport {
   visual_style: VisualStyle;
   do_dont: DoAndDont;
   generation_rules: string[];
+  style_template?: StyleTemplate; // Четкий шаблон стиля - формула успеха автора от начала до конца
   // Дополнительные поля из анализа комментариев и транскрипции
   video_id?: string;
   video_url?: string;
@@ -157,3 +170,4 @@ export interface GeneratedScenario {
   created_at: string;
   version: number;  // Номер варианта (1, 2, 3...)
 }
+

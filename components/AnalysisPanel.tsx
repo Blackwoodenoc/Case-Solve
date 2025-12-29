@@ -4,6 +4,7 @@ import { AnalysisState } from '../types';
 import { Bot, AlertCircle, Loader2, Copy, ExternalLink, Lightbulb, BarChart3, CheckCircle2, ShieldAlert } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { StylePassportViewer } from './StylePassportViewer';
+import { CommentBlueprintViewer } from './CommentBlueprintViewer';
 
 interface AnalysisPanelProps {
   state: AnalysisState;

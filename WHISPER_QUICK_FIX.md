@@ -45,3 +45,4 @@ python -m pip install openai-whisper
 См. [docs/WHISPER_TROUBLESHOOTING.md](docs/WHISPER_TROUBLESHOOTING.md) для детальных решений всех проблем.
 
 
+

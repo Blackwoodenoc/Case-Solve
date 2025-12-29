@@ -126,3 +126,4 @@ yt-dlp -x --audio-format mp3 "URL_видео"
 4. **Субтитры**: добавьте `--write-subs --sub-langs ru,en` для скачивания субтитров
 
 
+

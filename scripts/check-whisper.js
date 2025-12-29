@@ -87,3 +87,4 @@ console.log('\n💡 Затем проверьте health endpoint:');
 console.log('   http://localhost:3003/health');
 
 
+

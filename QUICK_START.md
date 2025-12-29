@@ -55,3 +55,4 @@ npm run dev:server
 - Python 3.8+ (для yt-dlp, Whisper)
 - yt-dlp установлен: `pip install yt-dlp`
 
+

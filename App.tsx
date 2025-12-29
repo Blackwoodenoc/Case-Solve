@@ -247,17 +247,6 @@ export default function App() {
                 </button>
               ))}
 
-              {/* Comment-to-Blueprint */}
-              <button
-                disabled={!video || analysis.isLoading || !video?.remoteUrl}
-                onClick={generateCommentBlueprint}
-                className="w-full text-left p-3.5 bg-slate-800/50 hover:bg-slate-700/50 border border-slate-700/50 rounded-lg flex items-center gap-3 transition-all disabled:opacity-40"
-                title={!video?.remoteUrl ? "Доступно только для видео по ссылке (YouTube)" : ""}
-              >
-                <Calendar size={18} className="text-cyan-400" />
-                <span className="font-medium text-xs">📋 Comment-to-Blueprint: Контент-план на 14 дней</span>
-              </button>
-
               <div className="pt-4 border-t border-slate-800/50 mt-4 flex gap-2">
                 <input
                   type="text" value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)}

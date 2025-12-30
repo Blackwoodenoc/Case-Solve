@@ -623,33 +623,63 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ video, onVideoSelect, 
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        className={`relative w-full aspect-video rounded-xl border-2 border-dashed transition-all flex flex-col items-center justify-center gap-4 ${isDragging ? 'border-blue-500 bg-blue-500/10' : 'border-slate-700 bg-slate-900/50'}`}
+        className={`relative w-full aspect-video rounded-2xl border-2 border-dashed transition-all flex flex-col items-center justify-center gap-5 backdrop-blur-sm ${
+          isDragging 
+            ? 'border-blue-400 bg-gradient-to-br from-blue-500/20 to-cyan-500/20 shadow-2xl shadow-blue-500/20 scale-[1.02]' 
+            : 'border-slate-700/50 bg-slate-900/30 hover:border-slate-600/50'
+        }`}
       >
         <input type="file" ref={fileInputRef} onChange={(e) => e.target.files?.[0] && onVideoSelect(e.target.files[0])} accept="video/*" className="hidden" />
         
         <div onClick={() => fileInputRef.current?.click()} className="flex flex-col items-center cursor-pointer group">
-          <div className="p-4 bg-slate-800 rounded-full mb-3 group-hover:bg-slate-700 transition-colors shadow-lg">
-            <Upload size={32} className="text-slate-400 group-hover:text-blue-400" />
+          <div className={`p-5 rounded-2xl mb-4 transition-all ${
+            isDragging 
+              ? 'bg-blue-500/30 scale-110' 
+              : 'bg-gradient-to-br from-slate-800/80 to-slate-900/80 group-hover:from-blue-500/20 group-hover:to-cyan-500/20 border border-slate-700/50 group-hover:border-blue-500/50'
+          }`}>
+            <Upload size={36} className={`transition-colors ${isDragging ? 'text-blue-300' : 'text-slate-400 group-hover:text-blue-400'}`} />
           </div>
-          <h3 className="text-slate-200 font-semibold">Загрузить видео файл</h3>
-          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-1">Прямой мультимодальный анализ</p>
+          <div className="text-center">
+            <h3 className="text-slate-100 font-bold text-lg mb-1.5">Загрузить видео файл</h3>
+            <p className="text-xs text-slate-400 font-medium">Перетащите файл сюда или нажмите для выбора</p>
+            <p className="text-[10px] text-slate-500 font-semibold uppercase tracking-widest mt-2">Прямой мультимодальный анализ</p>
+          </div>
         </div>
 
-        <div className="absolute bottom-0 left-0 right-0 p-4 bg-slate-950/80 backdrop-blur-md border-t border-slate-800 rounded-b-xl shadow-2xl">
+        <div className="absolute bottom-0 left-0 right-0 p-5 bg-gradient-to-t from-slate-950/95 via-slate-950/90 to-slate-950/80 backdrop-blur-xl border-t border-slate-800/50 rounded-b-2xl shadow-2xl">
+           <div className="mb-3">
+             <p className="text-xs font-semibold text-slate-400 mb-2 flex items-center gap-2">
+               <Globe size={14} className="text-blue-400" />
+               Или вставьте ссылку на видео
+             </p>
+           </div>
            <div className="flex gap-2">
                 <input 
-                    type="text" value={url} onChange={(e) => setUrl(e.target.value)}
-                    placeholder="YouTube Shorts / Instagram Reels / TikTok (автоскачивание)"
-                    className="flex-1 bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-2 text-xs text-slate-100 outline-none focus:ring-1 focus:ring-blue-500/50 placeholder:text-slate-600"
+                    type="text" 
+                    value={url} 
+                    onChange={(e) => setUrl(e.target.value)}
+                    placeholder="YouTube, Instagram Reels, TikTok..."
+                    className="flex-1 bg-slate-900/60 border border-slate-700/50 rounded-xl px-4 py-3 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500/50 placeholder:text-slate-600 transition-all"
                     onKeyDown={(e) => { if (e.key === 'Enter' && url && !isFetching) { e.preventDefault(); fetchFromUrl(); } }}
                 />
                 <button 
                     type="button"
                     onClick={() => { if (url && !isFetching) fetchFromUrl(); }} 
                     disabled={isFetching || !url} 
-                    className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-5 py-2 rounded-lg text-xs font-bold transition-all shadow-lg active:scale-95"
+                    className="bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed text-white px-6 py-3 rounded-xl text-sm font-bold transition-all shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30 active:scale-95 flex items-center gap-2"
                 >
-                    {isFetching ? <><Loader2 size={14} className="animate-spin inline mr-1" /> Скачиваю...</> : 'АНАЛИЗ'}
+                    {isFetching ? (
+                      <>
+                        <Loader2 size={16} className="animate-spin" />
+                        <span className="hidden sm:inline">Скачиваю...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Download size={16} />
+                        <span className="hidden sm:inline">Скачать</span>
+                        <span className="sm:hidden">↓</span>
+                      </>
+                    )}
                 </button>
            </div>
            {error && (

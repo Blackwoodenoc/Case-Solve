@@ -4,7 +4,6 @@ import { AnalysisState } from '../types';
 import { Bot, AlertCircle, Loader2, Copy, ExternalLink, Lightbulb, BarChart3, CheckCircle2, ShieldAlert } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { StylePassportViewer } from './StylePassportViewer';
-import { CommentBlueprintViewer } from './CommentBlueprintViewer';
 
 interface AnalysisPanelProps {
   state: AnalysisState;
@@ -22,44 +21,64 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ state, videoUrl })
 
   if (!isLoading && !result && !error && !stylePassport) {
     return (
-      <div className="h-full flex flex-col items-center justify-center text-slate-500 p-8 border-2 border-dashed border-slate-700 rounded-xl bg-slate-800/30">
-        <Bot size={48} className="mb-4 opacity-50" />
-        <p className="text-center text-sm">Загрузите видео или вставьте ссылку для глубокой аналитики.</p>
+      <div className="h-full flex flex-col items-center justify-center text-slate-400 p-8 border-2 border-dashed border-slate-800/50 rounded-2xl bg-slate-900/20 backdrop-blur-sm">
+        <div className="p-4 bg-slate-800/50 rounded-2xl mb-4 border border-slate-700/50">
+          <Bot size={40} className="text-slate-600" />
+        </div>
+        <p className="text-center text-sm font-medium text-slate-300 mb-1">Готов к анализу</p>
+        <p className="text-center text-xs text-slate-500">Загрузите видео или вставьте ссылку для начала</p>
       </div>
     );
   }
 
   return (
-    <div className="bg-slate-800 rounded-xl shadow-xl overflow-hidden flex flex-col h-full border border-slate-700">
-      <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex justify-between items-center">
-        <h3 className="font-semibold text-slate-200 flex items-center gap-2 text-sm uppercase tracking-wider">
-          <BarChart3 size={16} className="text-blue-400" /> Результат анализа
-        </h3>
+    <div className="bg-slate-900/40 backdrop-blur-sm rounded-2xl shadow-xl overflow-hidden flex flex-col h-full border border-slate-800/50">
+      <div className="p-5 border-b border-slate-800/50 bg-slate-900/60 backdrop-blur-sm flex justify-between items-center">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-gradient-to-br from-blue-500/20 to-cyan-500/20 rounded-lg border border-blue-500/30">
+            <BarChart3 size={18} className="text-blue-400" />
+          </div>
+          <div>
+            <h3 className="font-bold text-slate-100 text-base">Результат анализа</h3>
+            <p className="text-[10px] text-slate-500 font-medium">Детальная аналитика и инсайты</p>
+          </div>
+        </div>
         {result && !stylePassport && (
-          <button onClick={copyToClipboard} className="text-xs text-slate-400 hover:text-white flex items-center gap-1 transition-colors">
+          <button 
+            onClick={copyToClipboard} 
+            className="text-xs text-slate-400 hover:text-white flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800/50 hover:bg-slate-800/70 border border-slate-700/50 transition-all"
+          >
             <Copy size={14} /> Копировать
           </button>
         )}
       </div>
 
-      <div className="p-6 flex-1 overflow-y-auto bg-slate-800 custom-scrollbar">
+      <div className="p-6 flex-1 overflow-y-auto bg-slate-900/20 custom-scrollbar">
         {isLoading && (
-          <div className="flex flex-col items-center justify-center h-full space-y-4">
+          <div className="flex flex-col items-center justify-center h-full space-y-5">
             <div className="relative">
-              <Loader2 className="animate-spin text-blue-500" size={40} />
-              <Bot className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-blue-300" size={16} />
+              <div className="absolute inset-0 bg-gradient-to-r from-blue-500/20 to-cyan-500/20 rounded-full blur-xl animate-pulse"></div>
+              <div className="relative p-6 bg-gradient-to-br from-blue-500/10 to-cyan-500/10 rounded-2xl border border-blue-500/30">
+                <Loader2 className="animate-spin text-blue-400" size={48} />
+                <Bot className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-blue-300" size={20} />
+              </div>
             </div>
-            <div className="text-center">
-              <p className="text-slate-200 text-sm font-medium">Выполняется глубокий поиск...</p>
-              <p className="text-slate-500 text-[10px] mt-1 italic uppercase tracking-tighter">Обход шума профиля для поиска метаданных поста</p>
+            <div className="text-center space-y-1">
+              <p className="text-slate-100 text-base font-semibold">Выполняется глубокий анализ...</p>
+              <p className="text-slate-400 text-xs mt-1">Обработка видео и извлечение инсайтов</p>
             </div>
           </div>
         )}
 
         {error && (
-          <div className="bg-red-900/20 border border-red-500/50 text-red-200 p-4 rounded-lg flex gap-3 shadow-lg">
-            <AlertCircle size={20} className="mt-0.5 flex-shrink-0" />
-            <p className="text-sm leading-relaxed">{error}</p>
+          <div className="bg-gradient-to-r from-red-900/20 to-orange-900/20 border border-red-500/50 text-red-200 p-5 rounded-xl flex gap-4 shadow-xl backdrop-blur-sm">
+            <div className="p-2 bg-red-500/20 rounded-lg border border-red-500/30 flex-shrink-0">
+              <AlertCircle size={20} className="text-red-400" />
+            </div>
+            <div className="flex-1">
+              <p className="font-semibold text-red-300 mb-1">Ошибка анализа</p>
+              <p className="text-sm leading-relaxed text-red-200/90">{error}</p>
+            </div>
           </div>
         )}
 

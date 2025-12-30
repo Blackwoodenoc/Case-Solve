@@ -5,7 +5,7 @@ import { AnalysisPanel } from './components/AnalysisPanel';
 import { analyzeVideoContent, analyzeRemoteLink, fetchVideoMetadata, analyzeShortsDNA } from './services/geminiService';
 import { transcribeVideo } from './services/whisperService';
 import { VideoFile, AnalysisState, AnalysisType } from './types';
-import { BrainCircuit, Sparkles, FileVideo, Terminal, Info, Loader2, Key, ShieldCheck, ExternalLink, Dna } from 'lucide-react';
+import { BrainCircuit, Sparkles, Info, Loader2, Key, ShieldCheck, ExternalLink, Dna } from 'lucide-react';
 
 // The AI Studio environment provides the AIStudio type and window.aistudio property globally.
 // Local declarations are removed to avoid modifier and type mismatch conflicts.
@@ -81,7 +81,7 @@ export default function App() {
       // Специальный режим для Shorts DNA Analysis
       if (prompt === AnalysisType.SHORTS_DNA) {
         if (!video.file) {
-          throw new Error("Анализ ДНК Shorts доступен только для загруженных файлов (не для ссылок).");
+          throw new Error("Анализ доступен только для загруженных файлов (не для ссылок).");
         }
         
         // Сначала транскрибируем видео через Whisper
@@ -229,23 +229,15 @@ export default function App() {
             </h2>
             
             <div className="space-y-3">
-              {[
-                { type: AnalysisType.SUMMARY, icon: <FileVideo size={18} className="text-blue-400"/>, label: "📝 Краткое содержание" },
-                { type: AnalysisType.OBJECTS, icon: <BrainCircuit size={18} className="text-purple-400"/>, label: "🔍 Глубокий анализ" },
-                { type: AnalysisType.CODE, icon: <Terminal size={18} className="text-green-400"/>, label: "💻 Извлечь код" },
-                { type: AnalysisType.SHORTS_DNA, icon: <Dna size={18} className="text-pink-400"/>, label: "🧬 Анализ ДНК Shorts", disabled: video?.isRemote }
-              ].map(action => (
-                <button
-                  key={action.type}
-                  disabled={!video || analysis.isLoading || action.disabled}
-                  onClick={() => runAnalysis(action.type)}
-                  className="w-full text-left p-3.5 bg-slate-800/50 hover:bg-slate-700/50 border border-slate-700/50 rounded-lg flex items-center gap-3 transition-all disabled:opacity-40"
-                  title={action.disabled ? "Доступно только для загруженных файлов" : ""}
-                >
-                  {action.icon}
-                  <span className="font-medium text-xs">{action.label}</span>
-                </button>
-              ))}
+              <button
+                disabled={!video || analysis.isLoading || video?.isRemote}
+                onClick={() => runAnalysis(AnalysisType.SHORTS_DNA)}
+                className="w-full text-left p-3.5 bg-slate-800/50 hover:bg-slate-700/50 border border-slate-700/50 rounded-lg flex items-center gap-3 transition-all disabled:opacity-40"
+                title={video?.isRemote ? "Доступно только для загруженных файлов" : ""}
+              >
+                <Dna size={18} className="text-pink-400" />
+                <span className="font-medium text-xs">Анализ</span>
+              </button>
 
               <div className="pt-4 border-t border-slate-800/50 mt-4 flex gap-2">
                 <input
